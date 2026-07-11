@@ -141,7 +141,9 @@ struct ClaudeStatus {
   int sessionMin = 0;
   int sessionWindowMin = 300;
   float fiveHourPct = -1; // real OAuth quota from the bridge, -1 = unknown
+  int fiveHourResetMin = -1; // minutes until the 5h window resets
   float sevenDayPct = -1;
+  int sevenDayResetMin = -1; // minutes until the 7-day window resets
   bool needsInput = false; // waiting on a permission/approval prompt
 };
 
@@ -287,9 +289,16 @@ uint16_t currentStatusColor() {
   return TFT_GREEN;
 }
 
+// The ring is skipped when nothing changed (see drawSquareRing) so the 5s
+// poll doesn't visibly blank-and-repaint it. Anything that paints over the
+// ring area must invalidate this cache.
+float ringLastPct = -1000;
+uint16_t ringLastColor = 1;
+
 // Paints the full square border in one color (all four sides), used for the
 // attention flash so the whole edge blinks, not just the filled quota arc.
 void drawFullBorder(uint16_t color) {
+  ringLastPct = -1000; // ring got painted over; next ring draw must repaint
   int x0 = RING_MARGIN, y0 = RING_MARGIN;
   int side = SCREEN_W - 2 * RING_MARGIN;
   tft.fillRect(x0, y0, side, RING_THICKNESS, color);                              // top
@@ -301,13 +310,16 @@ void drawFullBorder(uint16_t color) {
 // Square progress ring hugging the screen edge. `pct` of the perimeter
 // (clockwise from top-left) is drawn in `color`, the rest in dark grey.
 void drawSquareRing(float pct, uint16_t color) {
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  if (pct == ringLastPct && color == ringLastColor) return; // nothing changed
+  ringLastPct = pct;
+  ringLastColor = color;
+
   int x0 = RING_MARGIN, y0 = RING_MARGIN;
   int x1 = SCREEN_W - RING_MARGIN, y1 = SCREEN_H - RING_MARGIN;
   int side = x1 - x0;
   float perimeter = side * 4.0;
-
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
 
   // Unfilled track is drawn black (not grey) so it blends into the background
   // and only the active quota portion is visible - still needs to be actively
@@ -355,12 +367,123 @@ String pctText(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "-";
 }
 
-// Two quota lines below the sprite: hourly (5h) window and weekly window.
-void drawQuotaText(float hourPct, float weekPct) {
+// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
+// over a big font-4 percentage. Values repaint only when their text changes
+// (force = after a full-screen clear), so the 5s poll never flashes them.
+const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
+const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
+String lastQuota5h, lastQuotaWk;
+
+// Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
+// a 1px x offset. Transparent draws - the caller must have cleared the region.
+void drawBoldString(const String &s, int x, int y, int font, uint16_t color) {
+  tft.setTextColor(color);
+  tft.drawString(s, x, y, font);
+  tft.drawString(s, x + 1, y, font);
+}
+
+void drawQuotaText(float hourPct, float weekPct, bool force) {
   tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("5h " + pctText(hourPct), SCREEN_CX, 190, 2);
-  tft.drawString("Weekly " + pctText(weekPct), SCREEN_CX, 208, 2);
+  if (force) {
+    drawBoldString("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    drawBoldString("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+  }
+  String v1 = pctText(hourPct), v2 = pctText(weekPct);
+  if (force || v1 != lastQuota5h) {
+    lastQuota5h = v1;
+    tft.fillRect(QUOTA_COL1_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
+    drawBoldString(v1, QUOTA_COL1_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+  if (force || v2 != lastQuotaWk) {
+    lastQuotaWk = v2;
+    tft.fillRect(QUOTA_COL2_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
+    drawBoldString(v2, QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  }
+}
+
+// ---------- quota-exhausted countdown ----------
+// When the current app's 5h or weekly window is used up, the pet is replaced
+// by a countdown to that window's reset (bridge sends minutes-until-reset).
+// A spent weekly window blocks usage even after the 5h one resets, so the
+// weekly countdown takes priority when both are exhausted.
+
+enum CdType { CD_NONE, CD_5H, CD_WEEK };
+
+float currentHourPct() {
+  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourPct : codexStatus.primaryPct;
+}
+
+int currentHourResetMin() {
+  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourResetMin : codexStatus.primaryResetMin;
+}
+
+float currentWeekPct() {
+  return currentApp == APP_CLAUDE ? claudeStatus.sevenDayPct : codexStatus.weeklyPct;
+}
+
+int currentWeekResetMin() {
+  return currentApp == APP_CLAUDE ? claudeStatus.sevenDayResetMin : codexStatus.weeklyResetMin;
+}
+
+CdType desiredCountdown() {
+  if (currentWeekPct() >= 99.9f && currentWeekResetMin() >= 0) return CD_WEEK;
+  if (currentHourPct() >= 99.9f && currentHourResetMin() >= 0) return CD_5H;
+  return CD_NONE;
+}
+
+CdType showingCd = CD_NONE; // what's on screen now (vs desiredCountdown())
+String lastCountdown;
+
+// The bridge only reports whole minutes, so the seconds tick locally against
+// a deadline anchored at millis(). Re-anchor only when the bridge disagrees
+// by more than ~a minute (new window, big clock drift), otherwise a poll
+// landing mid-minute would make the seconds jump around.
+unsigned long cdDeadlineMs = 0; // 0 = not anchored
+ActiveApp cdApp = APP_CLAUDE;   // which app/window the anchor belongs to
+CdType cdAnchorType = CD_NONE;
+
+void syncCountdownDeadline() {
+  int m = showingCd == CD_WEEK ? currentWeekResetMin() : currentHourResetMin();
+  if (m < 0) {
+    cdDeadlineMs = 0;
+    return;
+  }
+  long bridgeSec = (long)m * 60 + 30; // bridge floors to minutes: assume mid-minute
+  long ourSec = (long)(cdDeadlineMs - millis()) / 1000;
+  if (cdDeadlineMs == 0 || cdApp != currentApp || cdAnchorType != showingCd || ourSec < 0 ||
+      labs(ourSec - bridgeSec) > 90) {
+    cdDeadlineMs = millis() + (unsigned long)bridgeSec * 1000UL;
+    cdApp = currentApp;
+    cdAnchorType = showingCd;
+  }
+}
+
+void drawCountdown(bool force) {
+  long remain = cdDeadlineMs ? (long)(cdDeadlineMs - millis()) / 1000
+                             : (long)(showingCd == CD_WEEK ? currentWeekResetMin() : currentHourResetMin()) * 60;
+  if (remain < 0) remain = 0;
+  char buf[16];
+  long hours = remain / 3600;
+  if (hours >= 100) // weekly can be up to 168h: h:mm:ss wouldn't fit the ring
+    snprintf(buf, sizeof(buf), "%ld:%02ld", hours, (remain % 3600) / 60);
+  else
+    snprintf(buf, sizeof(buf), "%ld:%02ld:%02ld", hours, (remain % 3600) / 60, remain % 60);
+  String t(buf);
+  if (!force && t == lastCountdown) return;
+  // in-place glyph overwrite can't erase a shrinking string (h:mm:ss width is
+  // constant, but 100:00 -> 99:59:59 changes layout once) - clear on any
+  // length change
+  if (t.length() != lastCountdown.length()) force = true;
+  lastCountdown = t;
+  tft.setTextDatum(TC_DATUM);
+  if (force) {
+    tft.fillRect(SCREEN_CX - 99, 66, 198, 84, TFT_BLACK);
+    drawBoldString(showingCd == CD_WEEK ? "Wk RESET IN" : "5h RESET IN", SCREEN_CX, 72, 2, TFT_LIGHTGREY);
+  }
+  // Background-color draw overwrites glyphs in place (no clear-then-draw
+  // flash between seconds).
+  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.drawString(t, SCREEN_CX, 102, 6);
 }
 
 // App logo in the top-left corner (inside the quota ring) so a glance tells
@@ -387,19 +510,47 @@ float claudeRingPct() {
              : 0;
 }
 
-// Redraws whichever app is currently active, full screen: quota ring + sprite.
+// Redraws whichever app is currently active, full screen: quota ring +
+// sprite (or the reset countdown while the 5h window is exhausted).
+// Full clear + repaint - only for real transitions (app switch, mode return,
+// sprite change); steady-state data updates go through refreshActiveApp().
 void drawActiveApp() {
   tft.fillScreen(TFT_BLACK);
+  ringLastPct = -1000; // screen was cleared: force the ring repaint
+  showingCd = desiredCountdown();
+  if (showingCd != CD_NONE) syncCountdownDeadline();
+  else cdDeadlineMs = 0;
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(claudeRingPct(), currentStatusColor());
-    drawClaudeSprite(claudeFrame);
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct);
+    if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
+    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
   } else {
     drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
-    drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct);
+    if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
+    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
   }
+  if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
+}
+
+// In-place refresh after a bridge poll: ring repaint + only the text that
+// actually changed. No fillScreen, so the 5s poll doesn't blank the screen.
+void refreshActiveApp() {
+  if (desiredCountdown() != showingCd) { // pet <-> countdown (or 5h <-> weekly) swap
+    drawActiveApp();
+    return;
+  }
+  if (currentApp == APP_CLAUDE) {
+    drawSquareRing(claudeRingPct(), currentStatusColor());
+    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+  } else {
+    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+  }
+  if (showingCd != CD_NONE) {
+    syncCountdownDeadline();
+    drawCountdown(false);
+  }
 }
 
 // Redraws just the ring (cheap) - used for status color animation ticks
@@ -855,7 +1006,9 @@ bool parseStatusJson(const String &payload) {
     claudeStatus.sessionMin = c["session_min"] | 0;
     claudeStatus.sessionWindowMin = c["session_window_min"] | 300;
     claudeStatus.fiveHourPct = c["five_hour_pct"] | -1.0;
+    claudeStatus.fiveHourResetMin = c["five_hour_reset_min"] | -1;
     claudeStatus.sevenDayPct = c["seven_day_pct"] | -1.0;
+    claudeStatus.sevenDayResetMin = c["seven_day_reset_min"] | -1;
     claudeStatus.needsInput = c["needs_input"] | false;
   }
 
@@ -919,8 +1072,10 @@ void pollBridge() {
   http.end();
   DisplayMode eff = effectiveMode();
   if (eff != MODE_NET && eff != MODE_MUSIC) {
-    updateActiveApp();
-    drawActiveApp();
+    // Only a real app switch clears the screen; a plain data refresh paints
+    // in place so the poll doesn't flash the whole display.
+    if (updateActiveApp()) drawActiveApp();
+    else refreshActiveApp();
   }
 }
 
@@ -1449,13 +1604,22 @@ void loop() {
       lastAnimMs = nowMs;
       bool claudeWorking = claudeStatus.status == "working";
       bool codexWorking = codexStatus.status == "working";
-      if (currentApp == APP_CLAUDE && claudeWorking) {
+      if (showingCd != CD_NONE) {
+        // countdown owns the center area: no sprite frames over it
+      } else if (currentApp == APP_CLAUDE && claudeWorking) {
         claudeFrame = (claudeFrame + 1) % claudeFrameCount();
         drawClaudeSprite(claudeFrame);
       } else if (currentApp == APP_CODEX && codexWorking) {
         codexFrame = (codexFrame + 1) % codexFrameCount();
         drawCodexSprite(codexFrame);
       }
+    }
+
+    // countdown seconds tick locally between bridge polls
+    static unsigned long lastCdTickMs = 0;
+    if (showingCd != CD_NONE && nowMs - lastCdTickMs >= 1000) {
+      lastCdTickMs = nowMs;
+      drawCountdown(false);
     }
 
     // "urgent" flash toggle (independent, faster cadence)
