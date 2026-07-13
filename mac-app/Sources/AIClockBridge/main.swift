@@ -43,6 +43,11 @@ let nowPlaying = NowPlayingMonitor()
 nowPlaying.start()
 service.musicPlayingProvider = { nowPlaying.snapshot.playing }
 
+// Wired fallback: if the clock is plugged in over USB, push status/net down
+// the serial line (works around AP client isolation; no WiFi setup needed).
+let serialLink = SerialLink(service: service, netMonitor: netMonitor)
+serialLink.start()
+
 let server = HTTPServer(port: port, routes: [
     "/": { service.snapshot().jsonData() },
     "/status": { service.snapshot().jsonData() },

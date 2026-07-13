@@ -166,6 +166,8 @@ CodexStatus codexStatus;
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
+bool mainUiShown = false;      // false while the config-portal screen is up
+bool webServerStarted = false; // deferred: port 80 clashes with the portal
 
 // ---------- backlight brightness ----------
 // The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
@@ -841,8 +843,35 @@ void netDrawTick() {
   drawNetChart();
 }
 
-// Refills the sample queue from the bridge's /net endpoint. The seq field
-// tells us which samples we've already queued, so overlapping tails are fine.
+// Ingests one /net payload (from HTTP polling or a serial #NET frame) into
+// the sample queue. The seq field tells us which samples we've already
+// queued, so overlapping tails are fine.
+bool handleNetPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  netCurRx = doc["rx_bps"] | 0L;
+  netCurTx = doc["tx_bps"] | 0L;
+  netCpuPct = doc["cpu_pct"] | -1;
+  netMemPct = doc["mem_pct"] | -1;
+  netHeaderDirty = true;
+  long seq = doc["seq"] | -1L;
+  JsonArray rx = doc["rx"], tx = doc["tx"];
+  int n = min(rx.size(), tx.size());
+  // how many of the tail samples are new to us
+  int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
+  if (fresh < 0) fresh = 0;
+  for (int i = n - fresh; i < n; i++) {
+    if (netQCount >= NET_QUEUE) break; // queue full: drop the excess
+    int tail = (netQHead + netQCount) % NET_QUEUE;
+    netQRx[tail] = rx[i].as<long>();
+    netQTx[tail] = tx[i].as<long>();
+    netQCount++;
+  }
+  if (seq >= 0) netSeq = seq;
+  return true;
+}
+
+// Refills the sample queue from the bridge's /net endpoint.
 void pollNet() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
@@ -851,30 +880,7 @@ void pollNet() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    JsonDocument doc;
-    if (!deserializeJson(doc, http.getString())) {
-      netCurRx = doc["rx_bps"] | 0L;
-      netCurTx = doc["tx_bps"] | 0L;
-      netCpuPct = doc["cpu_pct"] | -1;
-      netMemPct = doc["mem_pct"] | -1;
-      netHeaderDirty = true;
-      long seq = doc["seq"] | -1L;
-      JsonArray rx = doc["rx"], tx = doc["tx"];
-      int n = min(rx.size(), tx.size());
-      // how many of the tail samples are new to us
-      int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
-      if (fresh < 0) fresh = 0;
-      for (int i = n - fresh; i < n; i++) {
-        if (netQCount >= NET_QUEUE) break; // queue full: drop the excess
-        int tail = (netQHead + netQCount) % NET_QUEUE;
-        netQRx[tail] = rx[i].as<long>();
-        netQTx[tail] = tx[i].as<long>();
-        netQCount++;
-      }
-      if (seq >= 0) netSeq = seq;
-    }
-  }
+  if (code == HTTP_CODE_OK) handleNetPayload(http.getString());
   http.end();
 }
 
@@ -1038,31 +1044,40 @@ void pollMusic() {
 
 // ---------- WiFi / bridge polling ----------
 
+WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
+
 void configModeCallback(WiFiManager *wm) {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi setup needed", 8, 40, 2);
-  tft.drawString("Connect phone to AP:", 8, 70, 2);
+  tft.drawString("WiFi setup needed", 8, 32, 2);
+  tft.drawString("Connect phone to AP:", 8, 62, 2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString(WIFI_PORTAL_AP_NAME, 8, 95, 2);
+  tft.drawString(WIFI_PORTAL_AP_NAME, 8, 87, 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("then open 192.168.4.1", 8, 125, 2);
+  tft.drawString("then open 192.168.4.1", 8, 117, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Or: plug into the computer", 8, 155, 2);
+  tft.drawString("via USB - no WiFi needed", 8, 178, 2);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString("Firmware v" FW_VERSION, 8, 215, 2);
 }
 
+// Non-blocking: with saved credentials this still waits ~10s for the join,
+// but a missing/failed WiFi no longer traps boot in the portal - the portal
+// keeps running from loop() while the USB serial link can take over the
+// screen (wired mode for APs with client isolation).
 void setupWiFi() {
-  WiFiManager wm;
-  wm.setAPCallback(configModeCallback);
+  wifiManager.setAPCallback(configModeCallback);
+  wifiManager.setConfigPortalBlocking(false);
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Connecting WiFi...", 8, 100, 2);
 
-  Serial.println("[wifi] starting WiFiManager autoConnect...");
-  bool ok = wm.autoConnect(WIFI_PORTAL_AP_NAME);
+  Serial.println("[wifi] starting WiFiManager autoConnect (non-blocking portal)...");
+  bool ok = wifiManager.autoConnect(WIFI_PORTAL_AP_NAME);
   Serial.printf("[wifi] autoConnect result=%d ssid=%s ip=%s\n", ok, WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str());
   Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
@@ -1106,7 +1121,9 @@ bool parseStatusJson(const String &payload) {
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
     if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
-    if (statusMusicPlaying) return MODE_MUSIC;
+    // music page needs HTTP for cover/text bitmaps, so don't auto-promote
+    // when running wired-only (no WiFi)
+    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
   }
   return displayMode;
 }
@@ -1150,6 +1167,95 @@ void pollBridge() {
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
     else refreshActiveApp();
+  }
+}
+
+// ---------- wired (USB serial) bridge link ----------
+// Fallback for WiFi networks with client isolation (device can't reach the
+// bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
+// plugged into the computer over USB, the bridge pushes the same /status and
+// /net payloads down the CH340 serial line as newline-terminated frames:
+//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
+//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
+// Everything else the device prints (logs) is ignored by the bridge.
+unsigned long lastSerialFrameMs = 0;
+bool wiredEverLinked = false;
+char serialLine[1600]; // biggest frame is #STATUS at ~600 bytes
+size_t serialLineLen = 0;
+
+bool wiredActive() { return wiredEverLinked && (millis() - lastSerialFrameMs) < 15000UL; }
+
+// First data over either transport replaces the boot/portal screen.
+void showMainUiIfNeeded() {
+  if (mainUiShown) return;
+  mainUiShown = true;
+  drawStaticChrome();
+  updateActiveApp();
+  drawActiveApp();
+}
+
+void handleSerialFrame(char *line) {
+  lastSerialFrameMs = millis();
+  wiredEverLinked = true;
+  if (!strncmp(line, "#HELLO", 6)) {
+    Serial.printf("#DEVICE {\"name\":\"aiclock\",\"fw\":\"%s\"}\n", FW_VERSION);
+    return;
+  }
+  if (!strncmp(line, "#STATUS ", 8)) {
+    if (parseStatusJson(String(line + 8))) {
+      lastSuccessMs = millis();
+      everPolled = true;
+      showMainUiIfNeeded();
+      DisplayMode eff = effectiveMode();
+      if (eff != MODE_NET && eff != MODE_MUSIC) {
+        if (updateActiveApp()) drawActiveApp();
+        else refreshActiveApp();
+      }
+    }
+    return;
+  }
+  if (!strncmp(line, "#NET ", 5)) {
+    handleNetPayload(String(line + 5));
+    return;
+  }
+  if (!strncmp(line, "#CMD ", 5)) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line + 5)) return;
+    if (doc["brightness"].is<int>()) {
+      brightness = constrain(doc["brightness"].as<int>(), 0, 100);
+      applyBrightness();
+      saveBrightness();
+    }
+    const char *mode = doc["display"] | (const char *)nullptr;
+    if (mode) {
+      String m(mode);
+      if (m == "auto") displayMode = MODE_AUTO;
+      else if (m == "claude") displayMode = MODE_CLAUDE;
+      else if (m == "codex") displayMode = MODE_CODEX;
+      else if (m == "net") displayMode = MODE_NET;
+      else if (m == "music") displayMode = MODE_MUSIC;
+      // the effectiveMode transition handler in loop() repaints the chrome
+    }
+    return;
+  }
+}
+
+// Drains the UART, splitting on newlines; frames start with '#', everything
+// else (line noise, echoes) is dropped.
+void pumpSerial() {
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch == '\n' || ch == '\r') {
+      if (serialLineLen > 0 && serialLine[0] == '#') {
+        serialLine[serialLineLen] = 0;
+        handleSerialFrame(serialLine);
+      }
+      serialLineLen = 0;
+    } else if (serialLineLen < sizeof(serialLine) - 1) {
+      serialLine[serialLineLen++] = ch;
+    } else {
+      serialLineLen = 0; // oversized line: drop it
+    }
   }
 }
 
@@ -1263,6 +1369,7 @@ void handleApiInfo() {
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
+  doc["wired"] = wiredActive(); // true = data currently arrives over USB serial
   doc["fw"] = FW_VERSION;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
@@ -1634,6 +1741,7 @@ void setupWebServer() {
 // ---------- Arduino entry points ----------
 
 void setup() {
+  Serial.setRxBufferSize(2048); // a serial #STATUS frame (~600B) must survive a slow draw
   Serial.begin(115200);
   LittleFS.begin();
   loadBridgeHost();
@@ -1648,24 +1756,42 @@ void setup() {
   applyBrightness();
 
   setupWiFi();
-  setupWebServer();
 
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi connected", 8, 70, 2);
-  tft.drawString("Admin page:", 8, 100, 2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
-  delay(3000);
+  if (WiFi.status() == WL_CONNECTED) {
+    setupWebServer();
+    webServerStarted = true;
 
-  drawStaticChrome();
-  drawActiveApp();
-  pollBridge();
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("WiFi connected", 8, 70, 2);
+    tft.drawString("Admin page:", 8, 100, 2);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
+    delay(3000);
+
+    showMainUiIfNeeded();
+    pollBridge();
+  }
+  // else: the config-portal screen stays up; either the user configures WiFi
+  // (handled in loop) or serial #STATUS frames arrive and take the screen over
 }
 
 void loop() {
-  webServer.handleClient();
+  wifiManager.process(); // keeps the config portal alive until WiFi is set up
+  pumpSerial();          // wired (USB) bridge frames
+
+  if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
+    // WiFi came up after boot (portal or slow AP); the portal has released
+    // port 80 by now, so the admin server can bind it
+    setupWebServer();
+    webServerStarted = true;
+    showMainUiIfNeeded();
+    lastPollMs = 0; // poll the bridge right away
+  }
+  if (webServerStarted) webServer.handleClient();
+  if (!mainUiShown) return; // config-portal screen is up, nothing to animate
+
   unsigned long nowMs = millis();
 
   // Effective mode may differ from the configured one (AUTO -> music while
@@ -1747,9 +1873,11 @@ void loop() {
     }
   }
 
-  // status poll continues in every mode (feeds /api/info and the web page)
+  // status poll continues in every mode (feeds /api/info and the web page).
+  // Wired-first: while serial frames are flowing, skip HTTP polling entirely
+  // (works around AP client isolation, and avoids double updates).
   if (nowMs - lastPollMs >= BRIDGE_POLL_INTERVAL_MS) {
     lastPollMs = nowMs;
-    pollBridge();
+    if (!wiredActive()) pollBridge();
   }
 }
