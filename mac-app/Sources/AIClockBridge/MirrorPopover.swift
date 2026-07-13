@@ -42,28 +42,6 @@ private func decodeSpriteFrames(_ data: Data, w: Int, h: Int) -> [CGImage] {
     return frames
 }
 
-private func decodeCover(_ data: Data, w: Int, h: Int) -> CGImage? {
-    let frameBytes = w * h * 2
-    guard data.count >= frameBytes else { return nil }
-    let bytes = [UInt8](data)
-    var rgba = [UInt8](repeating: 255, count: w * h * 4)
-    var src = 0
-    for p in 0..<(w * h) {
-        let v = (UInt16(bytes[src]) << 8) | UInt16(bytes[src + 1])
-        src += 2
-        rgba[p * 4 + 0] = UInt8((v >> 11) & 0x1F) << 3
-        rgba[p * 4 + 1] = UInt8((v >> 5) & 0x3F) << 2
-        rgba[p * 4 + 2] = UInt8(v & 0x1F) << 3
-    }
-    let data = CFDataCreate(nil, rgba, rgba.count)!
-    guard let provider = CGDataProvider(data: data) else { return nil }
-    return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
-                   bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
-                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
-                   provider: provider, decode: nil, shouldInterpolate: false,
-                   intent: .defaultIntent)
-}
-
 // MARK: - the 240x240 replica view
 
 final class MirrorView: NSView {
@@ -76,14 +54,14 @@ final class MirrorView: NSView {
     var flashOn = false
     var line1 = "5h -"
     var line2 = "Weekly -"
-    var showingClaude = true
+    var showingProvider = "claude"
+    var stale = false
     var deviceOK = false
     // net-mode mirror: same scrolling area-chart model as the firmware —
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
     // full-scale, dim-green download area + yellow upload line.
     var netMode = false
-    var netCPU = -1 // -1 = hidden (CPU/MEM row disabled in the menu)
-    var netMem = -1
+    var netNetworkName = "Not connected"
     var netHeaderDL = "0B"
     var netHeaderUL = "0B"
     private static let netCols = 224 // NET_CHART_W
@@ -108,17 +86,11 @@ final class MirrorView: NSView {
         max(maxV * 1.15, 10240)
     }
 
-    var musicMode = false
-    var musicTitle = ""
-    var musicArtist = ""
-    var musicElapsed: Double = 0
-    var musicDuration: Double = 0
-    var musicPlaying = false
-    var musicCover: CGImage?
+    var cpuMode = false
+    var cpuPercent = 0
 
-    private static let claudeLogo = Bundle.module.image(forResource: "claude-logo")
-    private static let codexLogo = Bundle.module.image(forResource: "codex-logo")
-
+    private static let claudeLogo = Bundle.appResources.image(forResource: "claude-logo")
+    private static let codexLogo = Bundle.appResources.image(forResource: "codex-logo")
     override var isFlipped: Bool { true } // draw in the panel's top-left origin
 
     override func draw(_ dirtyRect: NSRect) {
@@ -139,8 +111,21 @@ final class MirrorView: NSView {
             ctx.restoreGState()
             return
         }
-        if musicMode {
-            drawMusicScene(ctx)
+        if cpuMode {
+            drawCPUScene(ctx)
+            ctx.restoreGState()
+            return
+        }
+
+        if showingProvider == "none" || showingProvider == "checking" {
+            let style = NSMutableParagraphStyle()
+            style.alignment = .center
+            let text = showingProvider == "checking" ? "CHECKING ACCOUNTS..." : "NO AI LOGIN"
+            (text as NSString).draw(in: NSRect(x: 0, y: 105, width: 240, height: 24), withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .bold),
+                .foregroundColor: showingProvider == "checking" ? NSColor.systemCyan : NSColor.systemOrange,
+                .paragraphStyle: style,
+            ])
             ctx.restoreGState()
             return
         }
@@ -148,7 +133,8 @@ final class MirrorView: NSView {
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         let m: CGFloat = 4, t: CGFloat = 10
         let side: CGFloat = 240 - 2 * m
-        let color = deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
+        let color = showingProvider == "cursor" && ringPct <= 0 ? NSColor.systemRed
+            : deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
                              : NSColor.darkGray
         color.setFill()
         var remaining = side * 4 * CGFloat(max(0, min(ringPct, 100)) / 100)
@@ -166,7 +152,9 @@ final class MirrorView: NSView {
         if seg > 0 { NSRect(x: x0, y: 240 - m - seg, width: t, height: seg).fill() }     // left
 
         // sprite, centered, pixel-crisp
-        if !frames.isEmpty {
+        if showingProvider == "cursor" {
+            drawCursorMark(ctx, center: CGPoint(x: 120, y: 105), size: 92)
+        } else if !frames.isEmpty {
             let img = frames[min(frameIdx, frames.count - 1)]
             let rect = CGRect(x: 120 - spriteW / 2, y: 120 - spriteH / 2,
                               width: spriteW, height: spriteH)
@@ -180,9 +168,10 @@ final class MirrorView: NSView {
             ctx.restoreGState()
         }
 
-        // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
-        if let logo = Self.claudeLogo, let logo2 = Self.codexLogo {
-            (showingClaude ? logo : logo2).draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
+        // Claude/Codex logo, top-left inside the ring (firmware draws it at 14,18 @40px).
+        // Cursor keeps only its central mark.
+        if showingProvider != "cursor", let logo = Self.claudeLogo, let logo2 = Self.codexLogo {
+            (showingProvider == "claude" ? logo : logo2).draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
         }
 
         // quota text
@@ -193,8 +182,23 @@ final class MirrorView: NSView {
             .foregroundColor: NSColor.white,
             .paragraphStyle: style,
         ]
-        (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
-        (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        if showingProvider == "cursor" {
+            (line1 as NSString).draw(in: NSRect(x: 14, y: 188, width: 100, height: 36), withAttributes: attrs)
+            (line2 as NSString).draw(in: NSRect(x: 126, y: 188, width: 100, height: 36), withAttributes: attrs)
+        } else {
+            (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
+            (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        }
+
+        if stale {
+            let staleStyle = NSMutableParagraphStyle()
+            staleStyle.alignment = .right
+            ("STALE" as NSString).draw(in: NSRect(x: 174, y: 17, width: 50, height: 14), withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .bold),
+                .foregroundColor: NSColor.systemOrange,
+                .paragraphStyle: staleStyle,
+            ])
+        }
 
         if !deviceOK {
             let overlay: [NSAttributedString.Key: Any] = [
@@ -218,49 +222,92 @@ final class MirrorView: NSView {
         ctx.restoreGState()
     }
 
-    private func drawMusicScene(_ ctx: CGContext) {
-        let coverRect = CGRect(x: 56, y: 16, width: 128, height: 128)
-        if let musicCover {
-            ctx.saveGState()
-            ctx.interpolationQuality = .none
-            ctx.translateBy(x: 0, y: coverRect.midY)
-            ctx.scaleBy(x: 1, y: -1)
-            ctx.translateBy(x: 0, y: -coverRect.midY)
-            ctx.draw(musicCover, in: coverRect)
-            ctx.restoreGState()
-        } else {
-            ctx.setFillColor(NSColor.darkGray.cgColor)
-            ctx.fill(coverRect)
-            let style = NSMutableParagraphStyle()
-            style.alignment = .center
-            ("No Art" as NSString).draw(in: NSRect(x: 56, y: 72, width: 128, height: 20), withAttributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: NSColor.lightGray,
-                .paragraphStyle: style,
-            ])
-        }
+    private func drawCursorMark(_ ctx: CGContext, center: CGPoint, size: CGFloat) {
+        // Cursor's official 49x56 SVG path, scaled into the same square slot
+        // as the Claude/Codex logo while preserving its native aspect ratio.
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 48.0226, y: 13.2547))
+        path.addLine(to: CGPoint(x: 25.6601, y: 0.311786))
+        path.addCurve(to: CGPoint(x: 23.3378, y: 0.311786),
+                      control1: CGPoint(x: 24.942, y: -0.103929),
+                      control2: CGPoint(x: 24.0559, y: -0.103929))
+        path.addLine(to: CGPoint(x: 0.976347, y: 13.2547))
+        path.addCurve(to: CGPoint(x: 0, y: 14.9502),
+                      control1: CGPoint(x: 0.372691, y: 13.6041),
+                      control2: CGPoint(x: 0, y: 14.2503))
+        path.addLine(to: CGPoint(x: 0, y: 41.0498))
+        path.addCurve(to: CGPoint(x: 0.976347, y: 42.7453),
+                      control1: CGPoint(x: 0, y: 41.7496),
+                      control2: CGPoint(x: 0.372691, y: 42.3958))
+        path.addLine(to: CGPoint(x: 23.3389, y: 55.6882))
+        path.addCurve(to: CGPoint(x: 25.6611, y: 55.6882),
+                      control1: CGPoint(x: 24.057, y: 56.1039),
+                      control2: CGPoint(x: 24.943, y: 56.1039))
+        path.addLine(to: CGPoint(x: 48.0237, y: 42.7453))
+        path.addCurve(to: CGPoint(x: 49, y: 41.0498),
+                      control1: CGPoint(x: 48.6273, y: 42.3958),
+                      control2: CGPoint(x: 49, y: 41.7496))
+        path.addLine(to: CGPoint(x: 49, y: 14.9502))
+        path.addCurve(to: CGPoint(x: 48.0226, y: 13.2547),
+                      control1: CGPoint(x: 49, y: 14.2503),
+                      control2: CGPoint(x: 48.6273, y: 13.6041))
+        path.closeSubpath()
 
-        let titleStyle = NSMutableParagraphStyle()
-        titleStyle.alignment = .center
-        titleStyle.lineBreakMode = .byTruncatingTail
-        let title = musicTitle.isEmpty ? "No Music" : musicTitle
-        (title as NSString).draw(in: NSRect(x: 12, y: 154, width: 216, height: 24), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 15, weight: .bold),
-            .foregroundColor: NSColor.white,
-            .paragraphStyle: titleStyle,
-        ])
-        (musicArtist as NSString).draw(in: NSRect(x: 12, y: 178, width: 216, height: 20), withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+        path.move(to: CGPoint(x: 46.6179, y: 15.9964))
+        path.addLine(to: CGPoint(x: 25.0302, y: 53.4802))
+        path.addCurve(to: CGPoint(x: 24.4989, y: 53.337),
+                      control1: CGPoint(x: 24.8842, y: 53.7328),
+                      control2: CGPoint(x: 24.4989, y: 53.6296))
+        path.addLine(to: CGPoint(x: 24.4989, y: 28.793))
+        path.addCurve(to: CGPoint(x: 23.8134, y: 27.6027),
+                      control1: CGPoint(x: 24.4989, y: 28.3026),
+                      control2: CGPoint(x: 24.2375, y: 27.849))
+        path.addLine(to: CGPoint(x: 2.61094, y: 15.3312))
+        path.addCurve(to: CGPoint(x: 2.75372, y: 14.7987),
+                      control1: CGPoint(x: 2.35898, y: 15.1849),
+                      control2: CGPoint(x: 2.46186, y: 14.7987))
+        path.addLine(to: CGPoint(x: 45.9292, y: 14.7987))
+        path.addCurve(to: CGPoint(x: 46.6179, y: 15.9964),
+                      control1: CGPoint(x: 46.5423, y: 14.7987),
+                      control2: CGPoint(x: 46.9255, y: 15.4649))
+        path.closeSubpath()
+
+        let scale = size / 56
+        var transform = CGAffineTransform(a: scale, b: 0, c: 0, d: scale,
+                                          tx: center.x - 49 * scale / 2,
+                                          ty: center.y - size / 2)
+        guard let fitted = path.copy(using: &transform) else { return }
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.addPath(fitted)
+        ctx.drawPath(using: .eoFill)
+    }
+
+    private func drawCPUScene(_ ctx: CGContext) {
+        let center = NSMutableParagraphStyle()
+        center.alignment = .center
+        let value = max(0, min(100, cpuPercent))
+        let color: NSColor = value >= 85 ? .systemRed : value >= 60 ? .systemYellow : .systemGreen
+
+        ("MAC CPU" as NSString).draw(in: NSRect(x: 0, y: 22, width: 240, height: 24), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .bold),
             .foregroundColor: NSColor.lightGray,
-            .paragraphStyle: titleStyle,
+            .paragraphStyle: center,
         ])
-
-        let bar = CGRect(x: 20, y: 210, width: 200, height: 8)
-        ctx.setFillColor(NSColor.darkGray.cgColor)
+        ("\(value)%" as NSString).draw(in: NSRect(x: 0, y: 58, width: 240, height: 82), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 64, weight: .bold),
+            .foregroundColor: color,
+            .paragraphStyle: center,
+        ])
+        let bar = CGRect(x: 20, y: 158, width: 200, height: 18)
+        ctx.setFillColor(NSColor(white: 0.18, alpha: 1).cgColor)
         ctx.fill(bar)
-        let frac = musicDuration > 0 ? max(0, min(1, musicElapsed / musicDuration)) : 0
-        ctx.setFillColor((musicPlaying ? NSColor.systemGreen : NSColor.gray).cgColor)
-        ctx.fill(CGRect(x: bar.minX, y: bar.minY, width: bar.width * frac, height: bar.height))
+        ctx.setFillColor(color.cgColor)
+        ctx.fill(CGRect(x: bar.minX, y: bar.minY, width: bar.width * CGFloat(value) / 100, height: bar.height))
+        ("SYSTEM LOAD" as NSString).draw(in: NSRect(x: 0, y: 190, width: 240, height: 18), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor.gray,
+            .paragraphStyle: center,
+        ])
     }
 
     /// Replica of the firmware's net-speed screen v2: header readouts, then
@@ -348,26 +395,14 @@ final class MirrorView: NSView {
             ])
         let center = NSMutableParagraphStyle()
         center.alignment = .center
-        if netCPU >= 0 {
-            // fixed-x label + value columns, so a value width change (5% ->
-            // 30%) never shifts the rest of the row (matches the firmware)
-            let sysLabelFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .medium)
-            let sysValueFont = NSFont.monospacedSystemFont(ofSize: 15, weight: .bold)
-            ("CPU" as NSString).draw(at: NSPoint(x: 28, y: 196), withAttributes: [
-                .font: sysLabelFont, .foregroundColor: grey,
+        center.lineBreakMode = .byTruncatingMiddle
+        (netNetworkName as NSString).draw(
+            in: NSRect(x: 12, y: 193, width: 216, height: 18), withAttributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white, .paragraphStyle: center,
             ])
-            ("\(netCPU)%" as NSString).draw(at: NSPoint(x: 62, y: 190), withAttributes: [
-                .font: sysValueFont, .foregroundColor: NSColor.white,
-            ])
-            ("MEM" as NSString).draw(at: NSPoint(x: 130, y: 196), withAttributes: [
-                .font: sysLabelFont, .foregroundColor: grey,
-            ])
-            ("\(netMem)%" as NSString).draw(at: NSPoint(x: 164, y: 190), withAttributes: [
-                .font: sysValueFont, .foregroundColor: NSColor.white,
-            ])
-        }
         ("MAC NET  -  56s" as NSString).draw(
-            in: NSRect(x: 0, y: 212, width: 240, height: 12), withAttributes: [
+            in: NSRect(x: 0, y: 219, width: 240, height: 12), withAttributes: [
                 .font: labelFont, .foregroundColor: grey, .paragraphStyle: center,
             ])
     }
@@ -385,10 +420,9 @@ final class MirrorView: NSView {
 final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let service: StatusService
     private let netMonitor: NetSpeedMonitor
-    private let nowPlaying: NowPlayingMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "Cursor", "网速", "CPU"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -406,10 +440,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor) {
+    init(service: StatusService, netMonitor: NetSpeedMonitor) {
         self.service = service
         self.netMonitor = netMonitor
-        self.nowPlaying = nowPlaying
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -526,9 +559,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         let smoothed = netMonitor.currentSmoothed
         mirror.netHeaderDL = MirrorView.deviceSpeedText(smoothed.rx)
         mirror.netHeaderUL = MirrorView.deviceSpeedText(smoothed.tx)
-        let stats = SystemStatsMonitor.shared.snapshot() // internally 1s-cached
-        mirror.netCPU = stats.cpu
-        mirror.netMem = stats.mem
+        mirror.netNetworkName = NetworkNameMonitor.shared.currentName()
         mirror.pushNetSample(rx: cur.rx, tx: cur.tx)
     }
 
@@ -542,17 +573,17 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4][info.mode] ?? 0
+                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "cursor": 3,
+                               "net": 4, "cpu": 5][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
-                    : info.mode == "music" ? "音乐播放" : "固定显示"
-                self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
+                    : info.mode == "cpu" ? "CPU 占用率" : "固定显示"
+                self.statusLabel.stringValue = "\(DeviceClient.connectionDescription) · \(modeText)"
             case .failure:
                 self.mirror.deviceOK = false
                 self.mirror.needsDisplay = true
-                self.statusLabel.stringValue = DeviceClient.host.isEmpty
-                    ? "未设置设备地址（右键菜单 → 设置设备地址）" : "无法连接 \(DeviceClient.host)"
+                self.statusLabel.stringValue = DeviceClient.connectionDescription
             }
         }
     }
@@ -568,52 +599,74 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
     private func applyScene(_ info: DeviceInfo) {
-        // mirror what's actually on the device screen (effective), so an
-        // AUTO device that auto-switched to music shows music here too
         let enteringNet = info.effective == "net" && !mirror.netMode
         mirror.netMode = info.effective == "net"
-        mirror.musicMode = info.effective == "music"
+        mirror.cpuMode = info.effective == "cpu"
         if mirror.netMode {
             if enteringNet { mirror.resetNetSweep() } // fresh sweep, like the device's chrome reset
             mirror.needsDisplay = true
             return
         }
-        if mirror.musicMode {
-            let s = nowPlaying.snapshot
-            mirror.musicTitle = s.title
-            mirror.musicArtist = s.artist
-            mirror.musicElapsed = s.elapsed
-            mirror.musicDuration = s.duration
-            mirror.musicPlaying = s.playing
-            mirror.musicCover = decodeCover(nowPlaying.coverRGB565, w: 128, h: 128)
+        if mirror.cpuMode {
+            mirror.cpuPercent = SystemStatsMonitor.shared.cpuPercent()
             mirror.needsDisplay = true
             return
         }
         let snap = service.snapshot()
-        mirror.showingClaude = info.showing != "codex"
-        if mirror.showingClaude {
-            let pct = snap.claude.fiveHourPct
+        modeControl.setEnabled(snap.claude.eligible, forSegment: 1)
+        modeControl.setEnabled(snap.codex.eligible, forSegment: 2)
+        modeControl.setEnabled(snap.cursor.eligible, forSegment: 3)
+        mirror.showingProvider = info.showing
+        if info.showing == "checking" || info.showing == "none" {
+            mirror.frames = []
+            mirror.needsInput = false
+            mirror.stale = false
+            mirror.needsDisplay = true
+            return
+        }
+        if info.showing == "claude" {
+            let usedPct = snap.claude.fiveHourPct
                 ?? (snap.claude.sessionWindowMin > 0
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
-            mirror.ringPct = pct
-            mirror.line1 = "5h " + Self.pctText(pct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
+            let leftPct = remainingPercent(fromUsed: usedPct)
+            mirror.ringPct = leftPct ?? 0
+            let weekly = remainingPercent(fromUsed: snap.claude.sevenDayPct)
+            mirror.line1 = leftPct == nil ? "" : "5h LEFT " + Self.pctText(leftPct)
+            mirror.line2 = weekly == nil ? "" : "Weekly LEFT " + Self.pctText(weekly)
             mirror.needsInput = snap.claude.needsInput
-        } else {
-            mirror.ringPct = snap.codex.primaryPct ?? 0
-            mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            mirror.stale = snap.claude.stale
+        } else if info.showing == "codex" {
+            let ringUsedPct = snap.codex.primaryPct ?? snap.codex.weeklyPct
+            mirror.ringPct = remainingPercent(fromUsed: ringUsedPct) ?? 0
+            let primary = remainingPercent(fromUsed: snap.codex.primaryPct)
+            let weekly = remainingPercent(fromUsed: snap.codex.weeklyPct)
+            mirror.line1 = primary == nil ? "" : "5h LEFT " + Self.pctText(primary)
+            mirror.line2 = weekly == nil ? "" : "Weekly LEFT " + Self.pctText(weekly)
             mirror.needsInput = snap.codex.needsInput
+            mirror.stale = snap.codex.stale
+        } else {
+            mirror.frames = []
+            mirror.ringPct = remainingPercent(fromUsed: snap.cursor.totalPct) ?? 0
+            let auto = remainingPercent(fromUsed: snap.cursor.autoPct)
+            let api = remainingPercent(fromUsed: snap.cursor.apiPct)
+            mirror.line1 = auto == nil ? "" : "AUTO LEFT\n" + Self.pctText(auto)
+            mirror.line2 = api == nil ? "" : "API LEFT\n" + Self.pctText(api)
+            mirror.needsInput = false
+            mirror.stale = snap.cursor.stale
         }
         mirror.needsDisplay = true
     }
 
     private static func pctText(_ pct: Double?) -> String {
         guard let p = pct, p >= 0 else { return "-" }
-        return "\(Int(p))%"
+        return "\(Int(p.rounded()))%"
     }
 
     private func ensureSprite(_ info: DeviceInfo) {
+        guard info.showing == "claude" || info.showing == "codex" else {
+            mirror.frames = []
+            return
+        }
         let slot = info.showing == "codex" ? "codex" : "claude"
         let w = slot == "claude" ? info.claudeW : info.codexW
         let h = slot == "claude" ? info.claudeH : info.codexH
@@ -645,7 +698,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var flashCounter = 0
 
     private func animTick() {
-        guard let info = lastInfo, !mirror.netMode else { return }
+        guard let info = lastInfo, !mirror.netMode, !mirror.cpuMode else { return }
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if mirror.needsInput {
@@ -662,8 +715,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
         guard !mirror.frames.isEmpty else { return }
         let snap = service.snapshot()
-        let working = info.showing == "codex"
-            ? snap.codex.status == "working" : snap.claude.status == "working"
+        let working = info.showing == "cursor" || (info.showing == "codex"
+            ? snap.codex.status == "working" : snap.claude.status == "working")
         if working {
             mirror.frameIdx = (mirror.frameIdx + 1) % mirror.frames.count
         } else if mirror.frameIdx != 0 {
@@ -673,7 +726,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "claude", "codex", "cursor", "net", "cpu"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

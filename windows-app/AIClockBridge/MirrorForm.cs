@@ -26,27 +26,22 @@ sealed class MirrorControl : Control
     public bool FlashOn;
     public string Line1 = "5h -";
     public string Line2 = "Weekly -";
-    public bool ShowingClaude = true;
+    public string ShowingProvider = "claude";
+    public bool Stale;
     public bool DeviceOK;
     // net-mode mirror: same scrolling area-chart model as the firmware —
     // one column per 250ms sample, 224-column (56s) window, shared "nice"
     // full-scale, dim-green download area + yellow upload line.
     public bool NetMode;
-    public int NetCPU = -1; // -1 = hidden (CPU/MEM row disabled in the menu)
-    public int NetMem = -1;
+    public string NetNetworkName = "Not connected";
     public string NetHeaderDL = "0B";
     public string NetHeaderUL = "0B";
     const int NetCols = 224; // NET_CHART_W
     double[] _histRx = new double[NetCols];
     double[] _histTx = new double[NetCols];
 
-    public bool MusicMode;
-    public string MusicTitle = "";
-    public string MusicArtist = "";
-    public double MusicElapsed;
-    public double MusicDuration;
-    public bool MusicPlaying;
-    public Bitmap MusicCover;
+    public bool CpuMode;
+    public int CpuPercent;
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -109,16 +104,28 @@ sealed class MirrorControl : Control
             DrawNetScene(g);
             return;
         }
-        if (MusicMode)
+        if (CpuMode)
         {
-            DrawMusicScene(g);
+            DrawCpuScene(g);
+            return;
+        }
+
+        if (ShowingProvider is "none" or "checking")
+        {
+            using var font = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var fmt = new StringFormat { Alignment = StringAlignment.Center };
+            using var brush = new SolidBrush(ShowingProvider == "checking" ? Color.Cyan : Color.Orange);
+            g.DrawString(ShowingProvider == "checking" ? "CHECKING ACCOUNTS..." : "NO AI LOGIN",
+                font, brush, new RectangleF(0, 105, 240, 24), fmt);
             return;
         }
 
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         const float m = 4, t = 10;
         const float side = 240 - 2 * m;
-        using (var ring = new SolidBrush(DeviceOK ? Green : Color.FromArgb(90, 90, 90)))
+        var ringColor = ShowingProvider == "cursor" && RingPct <= 0 ? Color.Red
+            : DeviceOK ? Green : Color.FromArgb(90, 90, 90);
+        using (var ring = new SolidBrush(ringColor))
         {
             var remaining = side * 4 * (float)(Math.Clamp(RingPct, 0, 100) / 100);
             const float x0 = m, y0 = m, x1 = 240 - m;
@@ -136,7 +143,11 @@ sealed class MirrorControl : Control
         }
 
         // sprite, centered, pixel-crisp
-        if (Frames.Count > 0)
+        if (ShowingProvider == "cursor")
+        {
+            DrawCursorMark(g, 120, 105, 92);
+        }
+        else if (Frames.Count > 0)
         {
             var img = Frames[Math.Min(FrameIdx, Frames.Count - 1)];
             var state = g.Save();
@@ -147,14 +158,32 @@ sealed class MirrorControl : Control
         }
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
-        g.DrawImage(ShowingClaude ? ClaudeLogo : CodexLogo, new Rectangle(14, 18, 40, 40));
+        if (ShowingProvider != "cursor")
+            g.DrawImage(ShowingProvider == "claude" ? ClaudeLogo : CodexLogo,
+                new Rectangle(14, 18, 40, 40));
 
         // quota text
         using (var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var fmt = new StringFormat { Alignment = StringAlignment.Center })
         {
-            g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
-            g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
+            if (ShowingProvider == "cursor")
+            {
+                g.DrawString(Line1, font, Brushes.White, new RectangleF(14, 188, 100, 36), fmt);
+                g.DrawString(Line2, font, Brushes.White, new RectangleF(126, 188, 100, 36), fmt);
+            }
+            else
+            {
+                g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 18), fmt);
+                g.DrawString(Line2, font, Brushes.White, new RectangleF(0, 206, 240, 18), fmt);
+            }
+        }
+
+        if (Stale)
+        {
+            using var staleFont = new Font("Consolas", 9, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var staleFmt = new StringFormat { Alignment = StringAlignment.Far };
+            g.DrawString("STALE", staleFont, Brushes.Orange,
+                new RectangleF(174, 17, 50, 14), staleFmt);
         }
 
         if (!DeviceOK)
@@ -176,49 +205,56 @@ sealed class MirrorControl : Control
         }
     }
 
-    void DrawMusicScene(Graphics g)
+    static void DrawCursorMark(Graphics g, float centerX, float centerY, float size)
     {
-        var coverRect = new Rectangle(56, 16, 128, 128);
-        if (MusicCover != null)
-        {
-            var state = g.Save();
-            g.InterpolationMode = InterpolationMode.NearestNeighbor;
-            g.PixelOffsetMode = PixelOffsetMode.Half;
-            g.DrawImage(MusicCover, coverRect);
-            g.Restore(state);
-        }
-        else
-        {
-            using var dark = new SolidBrush(Color.FromArgb(64, 64, 64));
-            g.FillRectangle(dark, coverRect);
-            using var font = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var fmt = new StringFormat { Alignment = StringAlignment.Center };
-            g.DrawString("No Art", font, Brushes.LightGray, new RectangleF(56, 72, 128, 20), fmt);
-        }
+        using var path = new GraphicsPath(FillMode.Alternate);
+        path.StartFigure();
+        path.AddLine(48.0226f, 13.2547f, 25.6601f, 0.311786f);
+        path.AddBezier(25.6601f, 0.311786f, 24.942f, -0.103929f, 24.0559f, -0.103929f, 23.3378f, 0.311786f);
+        path.AddLine(23.3378f, 0.311786f, 0.976347f, 13.2547f);
+        path.AddBezier(0.976347f, 13.2547f, 0.372691f, 13.6041f, 0, 14.2503f, 0, 14.9502f);
+        path.AddLine(0, 14.9502f, 0, 41.0498f);
+        path.AddBezier(0, 41.0498f, 0, 41.7496f, 0.372691f, 42.3958f, 0.976347f, 42.7453f);
+        path.AddLine(0.976347f, 42.7453f, 23.3389f, 55.6882f);
+        path.AddBezier(23.3389f, 55.6882f, 24.057f, 56.1039f, 24.943f, 56.1039f, 25.6611f, 55.6882f);
+        path.AddLine(25.6611f, 55.6882f, 48.0237f, 42.7453f);
+        path.AddBezier(48.0237f, 42.7453f, 48.6273f, 42.3958f, 49, 41.7496f, 49, 41.0498f);
+        path.AddLine(49, 41.0498f, 49, 14.9502f);
+        path.AddBezier(49, 14.9502f, 49, 14.2503f, 48.6273f, 13.6041f, 48.0226f, 13.2547f);
+        path.CloseFigure();
+        path.StartFigure();
+        path.AddLine(46.6179f, 15.9964f, 25.0302f, 53.4802f);
+        path.AddBezier(25.0302f, 53.4802f, 24.8842f, 53.7328f, 24.4989f, 53.6296f, 24.4989f, 53.337f);
+        path.AddLine(24.4989f, 53.337f, 24.4989f, 28.793f);
+        path.AddBezier(24.4989f, 28.793f, 24.4989f, 28.3026f, 24.2375f, 27.849f, 23.8134f, 27.6027f);
+        path.AddLine(23.8134f, 27.6027f, 2.61094f, 15.3312f);
+        path.AddBezier(2.61094f, 15.3312f, 2.35898f, 15.1849f, 2.46186f, 14.7987f, 2.75372f, 14.7987f);
+        path.AddLine(2.75372f, 14.7987f, 45.9292f, 14.7987f);
+        path.AddBezier(45.9292f, 14.7987f, 46.5423f, 14.7987f, 46.9255f, 15.4649f, 46.6179f, 15.9964f);
+        path.CloseFigure();
+        var scale = size / 56;
+        using var transform = new Matrix(scale, 0, 0, scale,
+            centerX - 49 * scale / 2, centerY - size / 2);
+        path.Transform(transform);
+        g.FillPath(Brushes.White, path);
+    }
 
-        using var titleFmt = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter,
-            FormatFlags = StringFormatFlags.NoWrap,
-        };
-        var title = MusicTitle.Length == 0 ? "No Music" : MusicTitle;
-        using (var font = new Font("Microsoft YaHei UI", 15, FontStyle.Bold, GraphicsUnit.Pixel))
-        {
-            g.DrawString(title, font, Brushes.White, new RectangleF(12, 154, 216, 24), titleFmt);
-        }
-        using (var font = new Font("Microsoft YaHei UI", 12, FontStyle.Regular, GraphicsUnit.Pixel))
-        {
-            g.DrawString(MusicArtist, font, Brushes.LightGray,
-                         new RectangleF(12, 178, 216, 20), titleFmt);
-        }
-
-        var bar = new RectangleF(20, 210, 200, 8);
-        using var barBg = new SolidBrush(Color.FromArgb(64, 64, 64));
-        g.FillRectangle(barBg, bar);
-        var frac = MusicDuration > 0 ? (float)Math.Clamp(MusicElapsed / MusicDuration, 0, 1) : 0;
-        using var barFill = new SolidBrush(MusicPlaying ? Green : Color.Gray);
-        g.FillRectangle(barFill, bar.X, bar.Y, bar.Width * frac, bar.Height);
+    void DrawCpuScene(Graphics g)
+    {
+        var value = Math.Clamp(CpuPercent, 0, 100);
+        var color = value >= 85 ? Color.Red : value >= 60 ? Yellow : Green;
+        using var center = new StringFormat { Alignment = StringAlignment.Center };
+        using (var title = new Font("Consolas", 15, FontStyle.Bold, GraphicsUnit.Pixel))
+            g.DrawString("WINDOWS CPU", title, Brushes.LightGray, new RectangleF(0, 22, 240, 24), center);
+        using (var number = new Font("Consolas", 64, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (var brush = new SolidBrush(color))
+            g.DrawString($"{value}%", number, brush, new RectangleF(0, 58, 240, 82), center);
+        using var barBackground = new SolidBrush(Color.FromArgb(46, 46, 46));
+        using var barFill = new SolidBrush(color);
+        g.FillRectangle(barBackground, 20, 158, 200, 18);
+        g.FillRectangle(barFill, 20, 158, 200 * value / 100f, 18);
+        using var footer = new Font("Consolas", 10, FontStyle.Regular, GraphicsUnit.Pixel);
+        g.DrawString("SYSTEM LOAD", footer, Brushes.Gray, new RectangleF(0, 190, 240, 18), center);
     }
 
     /// Replica of the firmware's net-speed screen v2: header readouts, then
@@ -301,19 +337,17 @@ sealed class MirrorControl : Control
         }
         using (var center = new StringFormat { Alignment = StringAlignment.Center })
         {
-            if (NetCPU >= 0)
+            using var networkFont = new Font("Consolas", 11, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var networkFormat = new StringFormat
             {
-                // fixed-x label + value columns, so a value width change (5%
-                // -> 30%) never shifts the rest of the row (matches firmware)
-                using var sysLabelFont = new Font("Consolas", 7f);
-                using var sysValueFont = new Font("Consolas", 11.5f, FontStyle.Bold);
-                g.DrawString("CPU", sysLabelFont, greyBrush, 28, 196);
-                g.DrawString($"{NetCPU}%", sysValueFont, Brushes.White, 62, 189);
-                g.DrawString("MEM", sysLabelFont, greyBrush, 130, 196);
-                g.DrawString($"{NetMem}%", sysValueFont, Brushes.White, 164, 189);
-            }
-            g.DrawString("PC NET  -  56s", labelFont, greyBrush,
-                         new RectangleF(0, 212, 240, 12), center);
+                Alignment = StringAlignment.Center,
+                Trimming = StringTrimming.EllipsisCharacter,
+                FormatFlags = StringFormatFlags.NoWrap,
+            };
+            g.DrawString(NetNetworkName, networkFont, Brushes.White,
+                         new RectangleF(12, 193, 216, 18), networkFormat);
+            g.DrawString("WINDOWS NET  -  56s", labelFont, greyBrush,
+                         new RectangleF(0, 219, 240, 12), center);
         }
     }
 
@@ -344,11 +378,10 @@ sealed class MirrorForm : Form
 {
     readonly StatusService _service;
     readonly NetSpeedMonitor _netMonitor;
-    readonly NowPlayingMonitor _nowPlaying;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "cursor", "net", "cpu" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "Cursor", "网速", "CPU" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -369,11 +402,10 @@ sealed class MirrorForm : Form
     string _fetchingSlot;
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
-    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor, NowPlayingMonitor nowPlaying)
+    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor)
     {
         _service = service;
         _netMonitor = netMonitor;
-        _nowPlaying = nowPlaying;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -398,6 +430,7 @@ sealed class MirrorForm : Form
                 TextAlign = ContentAlignment.MiddleCenter,
                 Tag = Modes[i],
                 AutoSize = false,
+                Enabled = i == 0 || i >= 4,
             };
             btn.SetBounds(Px(14) + i * segWidth, Px(312), segWidth, Px(28));
             btn.CheckedChanged += ModeChanged;
@@ -523,9 +556,7 @@ sealed class MirrorForm : Form
         var smoothed = _netMonitor.CurrentSmoothed;
         _mirror.NetHeaderDL = MirrorControl.DeviceSpeedText(smoothed.Rx);
         _mirror.NetHeaderUL = MirrorControl.DeviceSpeedText(smoothed.Tx);
-        var (cpu, mem) = SystemStatsMonitor.Snapshot(); // internally 1s-cached
-        _mirror.NetCPU = cpu;
-        _mirror.NetMem = mem;
+        _mirror.NetNetworkName = NetworkNameMonitor.Shared.CurrentName();
         _mirror.PushNetSample(cur.Rx, cur.Tx);
     }
 
@@ -541,8 +572,7 @@ sealed class MirrorForm : Form
             if (!Visible) return;
             _mirror.DeviceOK = false;
             _mirror.Invalidate();
-            _statusLabel.Text = DeviceClient.Host.Length == 0
-                ? "未设置设备地址（右键托盘 → 设置设备地址）" : $"无法连接 {DeviceClient.Host}";
+            _statusLabel.Text = DeviceClient.ConnectionDescription;
             return;
         }
         if (!Visible) return;
@@ -557,65 +587,88 @@ sealed class MirrorForm : Form
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
-            : info.Mode == "music" ? "音乐播放" : "固定显示";
-        _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
+            : info.Mode == "cpu" ? "CPU 占用率" : "固定显示";
+        _statusLabel.Text = $"{DeviceClient.ConnectionDescription} · {modeText}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
     void ApplyScene(DeviceInfo info)
     {
-        // mirror what's actually on the device screen (effective), so an
-        // AUTO device that auto-switched to music shows music here too
         var enteringNet = info.Effective == "net" && !_mirror.NetMode;
         _mirror.NetMode = info.Effective == "net";
-        _mirror.MusicMode = info.Effective == "music";
+        _mirror.CpuMode = info.Effective == "cpu";
         if (_mirror.NetMode)
         {
             if (enteringNet) _mirror.ResetNetSweep(); // fresh sweep, like the device
             _mirror.Invalidate();
             return;
         }
-        if (_mirror.MusicMode)
+        if (_mirror.CpuMode)
         {
-            var s = _nowPlaying.Snapshot;
-            _mirror.MusicTitle = s.Title;
-            _mirror.MusicArtist = s.Artist;
-            _mirror.MusicElapsed = s.Elapsed;
-            _mirror.MusicDuration = s.Duration;
-            _mirror.MusicPlaying = s.Playing;
-            _mirror.MusicCover?.Dispose();
-            var cover = _nowPlaying.CoverRgb565;
-            _mirror.MusicCover = cover.Length > 0 ? Rgb565.Decode(cover, 0, 128, 128) : null;
+            _mirror.CpuPercent = SystemStatsMonitor.CpuPercent();
             _mirror.Invalidate();
             return;
         }
         var snap = _service.Snapshot();
-        _mirror.ShowingClaude = info.Showing != "codex";
-        if (_mirror.ShowingClaude)
+        _modeButtons[1].Enabled = snap.Claude.Eligible;
+        _modeButtons[2].Enabled = snap.Codex.Eligible;
+        _modeButtons[3].Enabled = snap.Cursor.Eligible;
+        _mirror.ShowingProvider = info.Showing;
+        if (info.Showing is "checking" or "none")
         {
-            var pct = snap.Claude.FiveHourPct
+            _mirror.Frames = new();
+            _mirror.NeedsInput = false;
+            _mirror.Stale = false;
+            _mirror.Invalidate();
+            return;
+        }
+        if (info.Showing == "claude")
+        {
+            var used = snap.Claude.FiveHourPct
                 ?? (snap.Claude.SessionWindowMin > 0
                     ? 100.0 * snap.Claude.SessionMin / snap.Claude.SessionWindowMin : 0);
-            _mirror.RingPct = pct;
-            _mirror.Line1 = "5h " + PctText(pct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Claude.SevenDayPct);
+            var primary = UsageFetcher.RemainingPercent(used);
+            var weekly = UsageFetcher.RemainingPercent(snap.Claude.SevenDayPct);
+            _mirror.RingPct = primary ?? 0;
+            _mirror.Line1 = primary.HasValue ? "5h LEFT " + PctText(primary) : "";
+            _mirror.Line2 = weekly.HasValue ? "Weekly LEFT " + PctText(weekly) : "";
             _mirror.NeedsInput = snap.Claude.NeedsInput;
+            _mirror.Stale = snap.Claude.Stale;
+        }
+        else if (info.Showing == "codex")
+        {
+            var primary = UsageFetcher.RemainingPercent(snap.Codex.PrimaryPct);
+            var weekly = UsageFetcher.RemainingPercent(snap.Codex.WeeklyPct);
+            _mirror.RingPct = UsageFetcher.RemainingPercent(snap.Codex.PrimaryPct ?? snap.Codex.WeeklyPct) ?? 0;
+            _mirror.Line1 = primary.HasValue ? "5h LEFT " + PctText(primary) : "";
+            _mirror.Line2 = weekly.HasValue ? "Weekly LEFT " + PctText(weekly) : "";
+            _mirror.NeedsInput = snap.Codex.NeedsInput;
+            _mirror.Stale = snap.Codex.Stale;
         }
         else
         {
-            _mirror.RingPct = snap.Codex.PrimaryPct ?? 0;
-            _mirror.Line1 = "5h " + PctText(snap.Codex.PrimaryPct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Codex.WeeklyPct);
-            _mirror.NeedsInput = snap.Codex.NeedsInput;
+            _mirror.Frames = new();
+            _mirror.RingPct = UsageFetcher.RemainingPercent(snap.Cursor.TotalPct) ?? 0;
+            var auto = UsageFetcher.RemainingPercent(snap.Cursor.AutoPct);
+            var api = UsageFetcher.RemainingPercent(snap.Cursor.ApiPct);
+            _mirror.Line1 = auto.HasValue ? "AUTO LEFT\n" + PctText(auto) : "";
+            _mirror.Line2 = api.HasValue ? "API LEFT\n" + PctText(api) : "";
+            _mirror.NeedsInput = false;
+            _mirror.Stale = snap.Cursor.Stale;
         }
         _mirror.Invalidate();
     }
 
     static string PctText(double? pct) =>
-        pct.HasValue && pct.Value >= 0 ? $"{(int)pct.Value}%" : "-";
+        pct.HasValue && pct.Value >= 0 ? $"{(int)Math.Round(pct.Value)}%" : "-";
 
     void EnsureSprite(DeviceInfo info)
     {
+        if (info.Showing != "claude" && info.Showing != "codex")
+        {
+            _mirror.Frames = new();
+            return;
+        }
         var slot = info.Showing == "codex" ? "codex" : "claude";
         var w = slot == "claude" ? info.ClaudeW : info.CodexW;
         var h = slot == "claude" ? info.ClaudeH : info.CodexH;
@@ -663,7 +716,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode) return;
+        if (_lastInfo == null || _mirror.NetMode || _mirror.CpuMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)
@@ -684,8 +737,8 @@ sealed class MirrorForm : Form
 
         if (_mirror.Frames.Count == 0) return;
         var snap = _service.Snapshot();
-        var working = _lastInfo.Showing == "codex"
-            ? snap.Codex.Status == "working" : snap.Claude.Status == "working";
+        var working = _lastInfo.Showing == "cursor" || (_lastInfo.Showing == "codex"
+            ? snap.Codex.Status == "working" : snap.Claude.Status == "working");
         if (working)
         {
             _mirror.FrameIdx = (_mirror.FrameIdx + 1) % _mirror.Frames.Count;

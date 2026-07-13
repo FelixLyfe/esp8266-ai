@@ -64,7 +64,7 @@ sealed class NetSpeedMonitor
     /// recent samples. `seq` is the total sample count; the device remembers
     /// the last seq it consumed and appends only the new entries, so its sweep
     /// runs at the true 4Hz cadence regardless of how often it polls.
-    public byte[] ToJson((int Cpu, int Mem)? stats = null)
+    public byte[] ToJson(string networkName)
     {
         int seq;
         Sample[] tail;
@@ -79,18 +79,12 @@ sealed class NetSpeedMonitor
         {
             ["rx_bps"] = (long)smoothed.Rx,
             ["tx_bps"] = (long)smoothed.Tx,
+            ["network_name"] = networkName,
             ["seq"] = seq,
             ["interval_ms"] = (int)(SampleInterval * 1000),
             ["rx"] = tail.Select(s => (long)s.Rx).ToArray(),
             ["tx"] = tail.Select(s => (long)s.Tx).ToArray(),
         };
-        // present only when the CPU/MEM row is enabled - the device shows the
-        // row iff the fields exist
-        if (stats.HasValue)
-        {
-            dict["cpu_pct"] = stats.Value.Cpu;
-            dict["mem_pct"] = stats.Value.Mem;
-        }
         return JsonSerializer.SerializeToUtf8Bytes(dict);
     }
 

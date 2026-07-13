@@ -3,31 +3,31 @@ using System.Drawing;
 
 namespace AIClockBridge;
 
-// Tray icon: the retro Macintosh device logo. Left click opens a live mirror
-// of the ESP8266 screen (MirrorForm); right click opens the control menu with
-// usage meters and device remote control. No quota text lives in the tray
-// itself.
+// Tray icon and control menu. Left click opens the live device mirror; right
+// click exposes quota, USB/Wi-Fi transport and device controls.
 sealed class TrayAppContext : ApplicationContext
 {
     readonly NotifyIcon _trayIcon;
-    readonly StatusService _service;
     readonly UsageFetcher _usage;
+    readonly SerialLink _serialLink;
     readonly int _port;
     readonly MirrorForm _mirror;
     readonly ContextMenuStrip _menu = new();
 
     readonly ToolStripMenuItem _claudeUsageItem = new("Claude …") { Enabled = false };
     readonly ToolStripMenuItem _codexUsageItem = new("Codex …") { Enabled = false };
-    readonly ToolStripMenuItem _deviceInfoItem = new("设备：未设置") { Enabled = false };
+    readonly ToolStripMenuItem _cursorUsageItem = new("Cursor …") { Enabled = false };
+    readonly ToolStripMenuItem _deviceInfoItem = new("设备：未连接") { Enabled = false };
+    readonly ToolStripMenuItem _usbReleaseItem = new("释放 USB 用于刷机");
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
 
     public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          NowPlayingMonitor nowPlaying, int port)
+                          SerialLink serialLink, int port)
     {
-        _service = service;
         _usage = usage;
+        _serialLink = serialLink;
         _port = port;
-        _mirror = new MirrorForm(service, netMonitor, nowPlaying);
+        _mirror = new MirrorForm(service, netMonitor);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -48,38 +48,50 @@ sealed class TrayAppContext : ApplicationContext
             _ = RefreshDeviceSection();
         };
         _usage.OnUpdate = RefreshUsageLines;
+        _serialLink.Changed += SerialLinkChanged;
     }
 
-    /// User-supplied device logo (bezel + dark screen + smiley + green status
-    /// dot). Full-color, matching the Mac menu-bar icon.
+    void SerialLinkChanged()
+    {
+        if (Application.MessageLoop) _ = RefreshDeviceSection();
+    }
+
     static Icon TrayIconFromAsset()
     {
-        using var bmp = new Bitmap(MirrorControl.LoadAsset("happy-mac.png"),
-                                   new Size(32, 32));
-        var handle = bmp.GetHicon();
-        // clone so the icon owns its data; the GetHicon handle would leak
-        // otherwise but a single tray icon for the app lifetime is fine
-        return Icon.FromHandle(handle);
+        using var bmp = new Bitmap(MirrorControl.LoadAsset("happy-mac.png"), new Size(32, 32));
+        return Icon.FromHandle(bmp.GetHicon());
     }
-
-    // MARK: - menu construction
 
     void BuildMenu()
     {
         _menu.Items.Add(_claudeUsageItem);
         _menu.Items.Add(_codexUsageItem);
+        _menu.Items.Add(_cursorUsageItem);
+
+        var retryMenu = new ToolStripMenuItem("手动重试额度");
+        foreach (var (title, provider) in new[]
+        {
+            ("立即重试 Claude", UsageProvider.Claude),
+            ("立即重试 Codex", UsageProvider.Codex),
+            ("立即重试 Cursor", UsageProvider.Cursor),
+        })
+        {
+            retryMenu.DropDownItems.Add(MakeItem(title, (_, _) => RetryUsage(provider, title)));
+        }
+        _menu.Items.Add(retryMenu);
         _menu.Items.Add(new ToolStripSeparator());
 
         _menu.Items.Add(_deviceInfoItem);
-        _menu.Items.Add(MakeItem("自动查找并配对设备", async (_, _) => await AutoPairAction()));
-        _menu.Items.Add(MakeItem("设置设备地址…", (_, _) => SetDeviceAddress()));
-        _menu.Items.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
+        _usbReleaseItem.Click += (_, _) => ToggleUsbRelease();
+        _menu.Items.Add(_usbReleaseItem);
+        _menu.Items.Add(MakeItem("选择 USB 串口…", (_, _) => SelectUsbPort()));
 
         var displayMenu = new ToolStripMenuItem("屏幕显示");
         foreach (var (title, mode) in new[]
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
+            ("固定 Codex", "codex"), ("固定 Cursor", "cursor"),
+            ("网速曲线", "net"), ("CPU 占用率", "cpu"),
         })
         {
             var item = new ToolStripMenuItem(title);
@@ -88,10 +100,8 @@ sealed class TrayAppContext : ApplicationContext
             displayMenu.DropDownItems.Add(item);
         }
         _menu.Items.Add(displayMenu);
-        // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         _menu.Items.Add(MakeItem("更换桌宠动画…（petdex）", (_, _) => OpenPetPicker()));
-
         var resetMenu = new ToolStripMenuItem("恢复默认动画");
         foreach (var (title, slot) in new[] { ("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex") })
         {
@@ -101,7 +111,14 @@ sealed class TrayAppContext : ApplicationContext
         }
         _menu.Items.Add(resetMenu);
 
-        _menu.Items.Add(MakeItem("把本机设为设备桥接", async (_, _) => await PointBridgeHere()));
+        var advanced = new ToolStripMenuItem("高级 · Wi-Fi 回退");
+        advanced.DropDownItems.Add(MakeItem("自动查找 Wi-Fi 设备", async (_, _) => await AutoPairAction()));
+        advanced.DropDownItems.Add(MakeItem("设置设备 IP…", (_, _) => SetDeviceAddress()));
+        advanced.DropDownItems.Add(MakeItem("打开设备网页", (_, _) => OpenDevicePage()));
+        advanced.DropDownItems.Add(MakeItem("把本机设为设备桥接", async (_, _) => await PointBridgeHere()));
+        advanced.DropDownItems.Add(MakeItem("桥接服务地址", (_, _) => ShowAddress()));
+        _menu.Items.Add(advanced);
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(MakeItem("刷新", (_, _) =>
         {
@@ -109,7 +126,6 @@ sealed class TrayAppContext : ApplicationContext
             RefreshUsageLines();
             _ = RefreshDeviceSection();
         }));
-        _menu.Items.Add(MakeItem("桥接服务地址", (_, _) => ShowAddress()));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(MakeItem("退出", (_, _) =>
         {
@@ -125,31 +141,64 @@ sealed class TrayAppContext : ApplicationContext
         return item;
     }
 
-    // MARK: - refresh
-
     void RefreshUsageLines()
     {
         _claudeUsageItem.Text = UsageLine("Claude", _usage.Claude, "7天");
         _codexUsageItem.Text = UsageLine("Codex", _usage.Codex, "周");
+        _cursorUsageItem.Text = CursorUsageLine(_usage.Cursor);
+        var providers = new Dictionary<string, ProviderUsage>
+        {
+            ["claude"] = _usage.Claude,
+            ["codex"] = _usage.Codex,
+            ["cursor"] = _usage.Cursor,
+        };
+        foreach (var (mode, provider) in providers)
+        {
+            var name = mode == "claude" ? "Claude" : mode == "codex" ? "Codex" : "Cursor";
+            _modeItems[mode].Enabled = provider.IsEligible();
+            _modeItems[mode].Text = $"固定 {name}" + (provider.IsLoggedOut ? "（未登录）" : "");
+        }
     }
 
-    static string UsageLine(string name, ProviderUsage u, string weeklyLabel)
+    static string UsageLine(string name, ProviderUsage usage, string weeklyLabel)
     {
-        if (u.Error != null && u.PrimaryPct == null) return $"{name}：{u.Error}";
+        if (usage.IsLoggedOut) return $"{name}：未登录";
+        if (usage.Error != null && !usage.HasDisplayQuota) return $"{name}：{usage.Error}";
         var parts = new List<string>();
-        if (u.PrimaryPct.HasValue)
+        if (UsageFetcher.RemainingPercent(usage.PrimaryPct) is double primary)
         {
-            var s = $"5h {(int)u.PrimaryPct.Value}%";
-            if (u.PrimaryResetMin.HasValue) s += $"（{FmtMin(u.PrimaryResetMin.Value)}后重置）";
-            parts.Add(s);
+            var text = $"5h 剩余 {(int)primary}%";
+            if (usage.PrimaryResetMin.HasValue) text += $"（{FmtMin(usage.PrimaryResetMin.Value)}后重置）";
+            parts.Add(text);
         }
-        if (u.WeeklyPct.HasValue)
+        if (UsageFetcher.RemainingPercent(usage.WeeklyPct) is double weekly)
         {
-            var s = $"{weeklyLabel} {(int)u.WeeklyPct.Value}%";
-            if (u.WeeklyResetMin.HasValue) s += $"（{FmtMin(u.WeeklyResetMin.Value)}）";
-            parts.Add(s);
+            var text = $"{weeklyLabel} 剩余 {(int)weekly}%";
+            if (usage.WeeklyResetMin.HasValue) text += $"（{FmtMin(usage.WeeklyResetMin.Value)}）";
+            parts.Add(text);
         }
-        return parts.Count == 0 ? $"{name}：额度未知" : $"{name}　" + string.Join("　", parts);
+        var result = parts.Count == 0 ? $"{name}：额度未知" : $"{name}　" + string.Join("　", parts);
+        return AppendFreshness(result, usage);
+    }
+
+    static string CursorUsageLine(ProviderUsage usage)
+    {
+        if (usage.IsLoggedOut) return "Cursor：未登录";
+        if (!usage.TotalPct.HasValue) return $"Cursor：{usage.Error ?? "额度未知"}";
+        var parts = new List<string>();
+        if (UsageFetcher.RemainingPercent(usage.AutoPct) is double auto)
+            parts.Add($"Auto剩余{(int)Math.Round(auto)}%");
+        if (UsageFetcher.RemainingPercent(usage.ApiPct) is double api)
+            parts.Add($"API剩余{(int)Math.Round(api)}%");
+        if (usage.BillingResetMin.HasValue) parts.Add($"（{FmtMin(usage.BillingResetMin.Value)}）");
+        return AppendFreshness("Cursor　" + string.Join("　", parts), usage);
+    }
+
+    static string AppendFreshness(string text, ProviderUsage usage)
+    {
+        if (usage.Error == null) return usage.IsStale() ? text + "　STALE" : text;
+        var success = usage.FetchedAt?.ToLocalTime().ToString("MM-dd HH:mm") ?? "从未";
+        return $"{text}　错误：{usage.Error}　上次成功：{success}";
     }
 
     static string FmtMin(int min)
@@ -159,29 +208,33 @@ sealed class TrayAppContext : ApplicationContext
         return $"{min}m";
     }
 
+    void RetryUsage(UsageProvider provider, string title)
+    {
+        if (!_usage.Retry(provider))
+            Toast("正在刷新", $"{title.Replace("立即重试 ", "")} 的额度请求仍在进行中。");
+    }
+
     async Task RefreshDeviceSection()
     {
-        var host = DeviceClient.Host;
-        if (host.Length == 0)
+        _usbReleaseItem.Text = _serialLink.ConnectionDescription.Contains("已释放")
+            ? "恢复 USB 连接" : "释放 USB 用于刷机";
+        if (!_serialLink.IsLinked && DeviceClient.BaseUrl == null)
         {
-            _deviceInfoItem.Text = "设备：未设置地址";
+            _deviceInfoItem.Text = $"设备：{DeviceClient.ConnectionDescription}";
             foreach (var item in _modeItems.Values) item.Checked = false;
             return;
         }
-        _deviceInfoItem.Text = $"设备：{host}（连接中…）";
+        _deviceInfoItem.Text = $"设备：{DeviceClient.ConnectionDescription}（读取中…）";
         DeviceInfo info;
-        try
+        try { info = await DeviceClient.FetchInfo(); }
+        catch
         {
-            info = await DeviceClient.FetchInfo();
-        }
-        catch (Exception)
-        {
-            _deviceInfoItem.Text = $"设备：{host}（无法连接）";
+            _deviceInfoItem.Text = $"设备：{DeviceClient.ConnectionDescription}（无法读取）";
             foreach (var item in _modeItems.Values) item.Checked = false;
-            // self-heal: the device may have moved to a new DHCP address;
-            // if it recently polled us from a different IP, adopt that.
             var seen = DeviceClient.LastSeenIp;
-            if (seen.Length > 0 && !host.StartsWith(seen) && await DeviceClient.VerifyDevice(seen))
+            var host = DeviceClient.Host;
+            if (!_serialLink.IsLinked && seen.Length > 0 && !host.StartsWith(seen)
+                && await DeviceClient.VerifyDevice(seen))
             {
                 DeviceClient.Host = seen;
                 await RefreshDeviceSection();
@@ -194,42 +247,50 @@ sealed class TrayAppContext : ApplicationContext
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
         var showing = info.Mode == "net" ? "网速"
-            : info.Mode == "music" ? "音乐"
-            : (info.Showing == "claude" ? "Claude" : "Codex");
-        _deviceInfoItem.Text =
-            $"设备：{info.Ip} · 正在显示 {showing} · {string.Join(" ", sprites)}";
+            : info.Mode == "cpu" ? "CPU"
+            : info.Showing == "claude" ? "Claude"
+            : info.Showing == "codex" ? "Codex"
+            : info.Showing == "cursor" ? "Cursor" : "无 AI 登录";
+        _deviceInfoItem.Text = $"设备：{DeviceClient.ConnectionDescription} · {showing} · {string.Join(" ", sprites)}";
         foreach (var (mode, item) in _modeItems) item.Checked = mode == info.Mode;
     }
 
-    // MARK: - pairing
+    void ToggleUsbRelease()
+    {
+        if (_serialLink.ConnectionDescription.Contains("已释放")) _serialLink.ResumeAfterFlashing();
+        else
+        {
+            _serialLink.ReleaseForFlashing();
+            Toast("USB 已释放", "现在可以使用网页刷机或 PlatformIO；设备重新枚举后会自动恢复，或再次点击菜单手动恢复。");
+        }
+        _ = RefreshDeviceSection();
+    }
+
+    void SelectUsbPort()
+    {
+        var ports = _serialLink.AvailablePorts;
+        var message = ports.Length == 0 ? "未发现串口。留空表示自动扫描。"
+            : "留空表示自动扫描。当前发现：\n" + string.Join("\n", ports);
+        var input = InputDialog.Show("USB 串口", message, _serialLink.PreferredPort, "自动扫描");
+        if (input == null) return;
+        _serialLink.PreferredPort = input;
+        _serialLink.ResumeAfterFlashing();
+        _ = RefreshDeviceSection();
+    }
 
     async Task AutoPairAction()
     {
         _deviceInfoItem.Text = "设备：正在查找…";
-        var ip = await DeviceClient.AutoPair(msg => _deviceInfoItem.Text = $"设备：{msg}");
-        if (ip != null)
-        {
-            Toast("配对成功", $"已找到设备并配对：{ip}");
-        }
-        else
-        {
-            Toast("未找到设备", """
-                局域网内没有发现 ESP8266 时钟。请确认：
-                1. 设备已通电并连上同一个 WiFi（首次使用需通过 AI-Clock-Setup 热点配网）
-                2. 路由器未开启"客户端隔离"
-                """);
-        }
+        var ip = await DeviceClient.AutoPair(message => _deviceInfoItem.Text = $"设备：{message}");
+        Toast(ip != null ? "配对成功" : "未找到设备", ip != null ? $"已找到设备并配对：{ip}" :
+            "局域网内没有发现 ESP8266 时钟。请确认设备已连上同一个 WiFi，且路由器未开启客户端隔离。");
         await RefreshDeviceSection();
     }
 
-    // MARK: - actions
-
     void SetDeviceAddress()
     {
-        var input = InputDialog.Show(
-            "设备地址",
-            "ESP8266 时钟的 IP（设备开机时屏幕上会显示，例如 192.168.1.50）",
-            DeviceClient.Host, "192.168.1.50");
+        var input = InputDialog.Show("设备地址",
+            "ESP8266 时钟的 IP（例如 192.168.1.50）", DeviceClient.Host, "192.168.1.50");
         if (input == null) return;
         DeviceClient.Host = input.Trim();
         _ = RefreshDeviceSection();
@@ -238,80 +299,59 @@ sealed class TrayAppContext : ApplicationContext
     void OpenDevicePage()
     {
         var url = DeviceClient.BaseUrl;
-        if (url == null)
-        {
-            SetDeviceAddress();
-            return;
-        }
+        if (url == null) { SetDeviceAddress(); return; }
         Process.Start(new ProcessStartInfo(url.ToString()) { UseShellExecute = true });
     }
 
     async Task SetDisplayMode(string mode)
     {
-        try
-        {
-            await DeviceClient.SetDisplayMode(mode);
-            await RefreshDeviceSection();
-        }
-        catch (Exception e)
-        {
-            Toast("切换失败", e.Message);
-        }
+        try { await DeviceClient.SetDisplayMode(mode); await RefreshDeviceSection(); }
+        catch (Exception error) { Toast("切换失败", error.Message); }
     }
 
-    void OpenPetPicker()
-    {
-        if (DeviceClient.Host.Length == 0) SetDeviceAddress();
-        PetPickerForm.ShowShared();
-    }
+    void OpenPetPicker() => PetPickerForm.ShowShared();
 
     async Task ResetSprite(string slot)
     {
-        try
-        {
-            await DeviceClient.ResetSprite(slot);
-            await RefreshDeviceSection();
-        }
-        catch (Exception e)
-        {
-            Toast("恢复失败", e.Message);
-        }
+        try { await DeviceClient.ResetSprite(slot); await RefreshDeviceSection(); }
+        catch (Exception error) { Toast("恢复失败", error.Message); }
     }
 
     async Task PointBridgeHere()
     {
         var ip = DeviceClient.LocalIPv4();
-        if (ip == null)
-        {
-            Toast("失败", "获取本机局域网 IP 失败");
-            return;
-        }
+        if (ip == null) { Toast("失败", "获取本机局域网 IP 失败"); return; }
         var bridge = $"{ip}:{_port}";
         try
         {
             await DeviceClient.SetBridgeHost(bridge);
-            Toast("已设置", $"设备将从 http://{bridge}/status 拉取状态");
+            Toast("已设置", $"设备将在 Wi-Fi 回退时从 http://{bridge}/status 拉取状态");
         }
-        catch (Exception e)
-        {
-            Toast("设置失败", e.Message);
-        }
+        catch (Exception error) { Toast("设置失败", error.Message); }
     }
 
     void ShowAddress()
     {
         var ip = DeviceClient.LocalIPv4() ?? "<本机局域网IP>";
-        Toast("桥接服务地址",
-              $"http://{ip}:{_port}/status\n\n设备端 Bridge host 填：{ip}:{_port}");
+        Toast("桥接服务地址", $"http://{ip}:{_port}/status\n\n设备端 Bridge host 填：{ip}:{_port}");
     }
 
-    static void Toast(string title, string text)
-    {
+    static void Toast(string title, string text) =>
         MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _serialLink.Changed -= SerialLinkChanged;
+            _trayIcon.Dispose();
+            _mirror.Dispose();
+            _menu.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }
 
-// Small modal prompt, the NSAlert-with-text-field equivalent.
 static class InputDialog
 {
     public static string Show(string title, string message, string value, string placeholder)
@@ -325,17 +365,17 @@ static class InputDialog
             MaximizeBox = false,
             ShowInTaskbar = false,
             Font = new Font("Microsoft YaHei UI", 9f),
-            ClientSize = new Size(380, 140),
+            ClientSize = new Size(380, 160),
             TopMost = true,
         };
         var label = new Label { Text = message };
-        label.SetBounds(14, 12, 352, 40);
+        label.SetBounds(14, 12, 352, 60);
         var textBox = new TextBox { Text = value, PlaceholderText = placeholder };
-        textBox.SetBounds(14, 58, 352, 24);
+        textBox.SetBounds(14, 78, 352, 24);
         var ok = new Button { Text = "保存", DialogResult = DialogResult.OK };
-        ok.SetBounds(196, 96, 80, 28);
+        ok.SetBounds(196, 116, 80, 28);
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel };
-        cancel.SetBounds(286, 96, 80, 28);
+        cancel.SetBounds(286, 116, 80, 28);
         form.Controls.AddRange(new Control[] { label, textBox, ok, cancel });
         form.AcceptButton = ok;
         form.CancelButton = cancel;

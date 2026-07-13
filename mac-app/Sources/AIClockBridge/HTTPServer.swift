@@ -12,6 +12,7 @@ final class HTTPServer {
     private let postRoutes: [String: (Data) -> Data]
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "aiclock.http")
+    private var retryAttempts = 0
 
     /// Called (on the server queue) with (path, remoteIP) for every request.
     /// The ESP8266 polls /status constantly, so this is how the app learns
@@ -27,12 +28,40 @@ final class HTTPServer {
     }
 
     func start() throws {
+        try startListener()
+    }
+
+    private func startListener() throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         let listener = try NWListener(using: params, on: port)
         listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
-        listener.start(queue: queue)
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener, self.listener === listener else { return }
+            switch state {
+            case .ready:
+                self.retryAttempts = 0
+                FileHandle.standardError.write(Data("[bridge] HTTP ready on 0.0.0.0:\(self.port)\n".utf8))
+            case let .failed(error):
+                FileHandle.standardError.write(Data("[bridge] HTTP listener failed: \(error)\n".utf8))
+                listener.cancel()
+                self.listener = nil
+                guard self.retryAttempts < 20 else { return }
+                self.retryAttempts += 1
+                self.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self, self.listener == nil else { return }
+                    do {
+                        try self.startListener()
+                    } catch {
+                        FileHandle.standardError.write(Data("[bridge] HTTP retry failed: \(error)\n".utf8))
+                    }
+                }
+            default:
+                break
+            }
+        }
         self.listener = listener
+        listener.start(queue: queue)
     }
 
     private func accept(_ conn: NWConnection) {

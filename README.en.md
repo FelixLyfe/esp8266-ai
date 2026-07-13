@@ -21,15 +21,15 @@
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac Mini Display">
 </p>
 
-A retro mini-TV with a 240×240 screen that sits on your desk showing **what Claude Code / Codex CLI are doing right now and how much quota you have left**. No API key needed: everything comes from the CLI credentials and session logs already on your machine, served to the device over your LAN by the companion Mac / Windows bridge app.
+A retro mini-TV with a 240×240 screen that sits on your desk showing **what Claude Code / Codex CLI are doing and how much Claude / Codex / Cursor quota you have left**. No separate API key is needed: everything comes from credentials and session data already on your machine. Both macOS and Windows bridges use USB by default and fall back to WiFi/HTTP only after USB disconnects.
 
 ## Features
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. A square progress ring plus large digits show your real 5-hour / weekly quota usage; when a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
-| <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis. |
-| <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Claude/Codex show working state; all three show quota. Cursor is quota-only: its ring is Total and the bottom row shows Auto / API remaining. Only signed-in providers with a successful quota fetch are shown. |
+| <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis, and the current computer's network name. |
+| CPU | **CPU usage**<br>A dedicated page shows the current computer's system CPU usage, status color, and progress bar in real time. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
 ## Getting started
@@ -44,29 +44,31 @@ Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug
 >
 > Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) to address `0x0` with esptool.
 
-### Step 2 · Connect WiFi
-
-On first boot the device opens a hotspot named **`AI-Clock-Setup`**: join it from your phone and the setup page pops up (or browse to `192.168.4.1`), pick your WiFi and enter the password. Done.
-
-### Step 3 · Install the bridge app
+### Step 2 · Install the bridge app
 
 Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) and open:
 
-- **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; on first launch allow it in "System Settings → Privacy & Security" and grant local-network access)
-- **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click
+- **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; allow it in "System Settings → Privacy & Security" on first launch). Keep the USB data cable connected and start the app; it handshakes automatically, with **no WiFi setup required**.
+- **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click. Keep the USB data cable connected and the app handshakes automatically, with **no WiFi setup required**. Install the CH340 driver first if no COM port appears.
 
-The bridge lives in your menu bar / tray and **auto-discovers and pairs** with the device on the same LAN — at this point the screen comes alive.
+The bridge owns the USB serial port while connected. Use “Release USB for flashing” in its menu before web/PlatformIO flashing; it resumes after the device is re-enumerated. Firmware waits five seconds for USB at boot, keeps WiFi off while USB is healthy, and starts WiFi fallback after five seconds without the link.
+
+### Step 3 · Optional WiFi fallback
+
+Normal macOS and Windows use can skip this step. When USB or the bridge app is unavailable, the device tries saved WiFi. If none is configured, join the **`AI-Clock-Setup`** hotspot and open `192.168.4.1` to choose a network.
 
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
-Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, music/network pages, and more).
+Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, CPU/network pages, and more).
 
 ## FAQ
 
-- **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.
-- **Quota shows `-` forever**: no Claude Code / Codex CLI login on this machine, so the bridge has no credentials to read.
+- **Screen border flashing red**: no bridge data is arriving — check the USB data cable, CH340 serial port, and bridge app first; in fallback mode check that both sides are on the same WiFi.
+- **A provider is missing**: it is not signed in, or this launch has not completed a successful quota fetch. Claude, Codex, and Cursor refresh independently every two minutes; data with no successful refresh for six hours leaves rotation.
+- **Retry quota now**: right-click → “手动重试额度” and retry Claude, Codex, or Cursor individually. A manual retry bypasses the current backoff delay.
+- **Cursor quota notes**: the ring is Total remaining and the bottom row is Auto / API remaining. The bridge reads Cursor's local login token and calls the internal endpoint used by the Cursor client; a future Cursor update may require a bridge update.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
 
 ## Development

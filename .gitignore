@@ -3,8 +3,10 @@ firmware/.pio-venv/
 mac-app/.build/
 windows-app/**/bin/
 windows-app/**/obj/
+windows-app/.publish/
 __pycache__/
 *.pyc
 .DS_Store
 .claude/
 dist/
+.aiflow/insight/

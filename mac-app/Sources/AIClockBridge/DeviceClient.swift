@@ -1,15 +1,14 @@
 import Foundation
 
-// Talks to the ESP8266 clock's own HTTP API, so everything the device's web
-// page can do (switch display, set bridge host, upload/reset pet GIFs) is
-// available straight from the menu bar. Device address persists in defaults.
+// One device API with USB-first routing. HTTP remains the transparent Wi-Fi
+// fallback, so callers do not duplicate transport-specific behavior.
 
 struct DeviceInfo {
     var ip = ""
     var ssid = ""
     var bridge = ""
-    var mode = "auto"       // configured: auto | claude | codex | net | music
-    var effective = "auto"  // what's actually on screen (AUTO may promote to music)
+    var mode = "auto"       // configured: auto | claude | codex | cursor | net | cpu
+    var effective = "auto"  // what's actually on screen
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
@@ -23,6 +22,11 @@ struct DeviceInfo {
 final class DeviceClient {
     private static let hostKey = "device_host"
     private static let lastSeenKey = "device_last_seen"
+    static weak var usbLink: SerialLink?
+
+    static var connectionDescription: String {
+        usbLink?.connectionDescription ?? (baseURL == nil ? "未连接" : "Wi-Fi 回退")
+    }
 
     static var host: String {
         get { UserDefaults.standard.string(forKey: hostKey) ?? "" }
@@ -43,6 +47,12 @@ final class DeviceClient {
 
     /// GET /api/info
     static func fetchInfo(completion: @escaping (Result<DeviceInfo, Error>) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.fetchInfo { result in
+                completion(result.flatMap(Self.decodeInfo))
+            }
+            return
+        }
         guard let base = baseURL else {
             completion(.failure(Self.noHostError))
             return
@@ -53,27 +63,8 @@ final class DeviceClient {
             var result: Result<DeviceInfo, Error>
             if let error = error {
                 result = .failure(error)
-            } else if let data = data,
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                var info = DeviceInfo()
-                info.ip = obj["ip"] as? String ?? ""
-                info.ssid = obj["ssid"] as? String ?? ""
-                info.bridge = obj["bridge"] as? String ?? ""
-                info.mode = obj["mode"] as? String ?? "auto"
-                info.effective = obj["effective"] as? String ?? info.mode
-                info.showing = obj["showing"] as? String ?? ""
-                info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
-                info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
-                info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
-                let claude = obj["claude"] as? [String: Any]
-                let codex = obj["codex"] as? [String: Any]
-                info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
-                info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
-                info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
-                info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
-                info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
-                info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
-                result = .success(info)
+            } else if let data = data {
+                result = Self.decodeInfo(data)
             } else {
                 result = .failure(Self.badResponseError)
             }
@@ -81,24 +72,40 @@ final class DeviceClient {
         }.resume()
     }
 
-    /// POST /api/display  mode=auto|claude|codex|net|music
+    /// POST /api/display  mode=auto|claude|codex|cursor|net|cpu
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.sendCommand(["display": mode], completion: completion)
+            return
+        }
         postForm(path: "api/display", fields: ["mode": mode], completion: completion)
     }
 
     /// POST /api/bridge  host=ip:port
     static func setBridgeHost(_ bridgeHost: String, completion: @escaping (Error?) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.sendCommand(["bridge": bridgeHost], completion: completion)
+            return
+        }
         postForm(path: "api/bridge", fields: ["host": bridgeHost], completion: completion)
     }
 
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     static func setBrightness(_ level: Int, completion: @escaping (Error?) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.sendCommand(["brightness": level], completion: completion)
+            return
+        }
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
     }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.
     static func uploadGif(_ gif: Data, slot: String, completion: @escaping (Error?) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.uploadGif(gif, slot: slot, completion: completion)
+            return
+        }
         guard let base = baseURL else {
             completion(Self.noHostError)
             return
@@ -120,12 +127,20 @@ final class DeviceClient {
 
     /// POST /sprite/{claude|codex}/reset — back to the compiled-in animation.
     static func resetSprite(slot: String, completion: @escaping (Error?) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.sendCommand(["reset_sprite": slot], completion: completion)
+            return
+        }
         postForm(path: "sprite/\(slot)/reset", fields: [:], completion: completion)
     }
 
     /// GET /sprite/{claude|codex}/raw — the animation the device is actually
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     static func fetchSpriteRaw(slot: String, completion: @escaping (Result<Data, Error>) -> Void) {
+        if let usb = usbLink, usb.isLinked {
+            usb.fetchSprite(slot: slot, completion: completion)
+            return
+        }
         guard let base = baseURL else {
             completion(.failure(Self.noHostError))
             return
@@ -146,6 +161,31 @@ final class DeviceClient {
     }
 
     // MARK: - internals
+
+    private static func decodeInfo(_ data: Data) -> Result<DeviceInfo, Error> {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .failure(badResponseError)
+        }
+        var info = DeviceInfo()
+        info.ip = obj["ip"] as? String ?? ""
+        info.ssid = obj["ssid"] as? String ?? ""
+        info.bridge = obj["bridge"] as? String ?? ""
+        info.mode = obj["mode"] as? String ?? "auto"
+        info.effective = obj["effective"] as? String ?? info.mode
+        info.showing = obj["showing"] as? String ?? ""
+        info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
+        info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
+        info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+        let claude = obj["claude"] as? [String: Any]
+        let codex = obj["codex"] as? [String: Any]
+        info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
+        info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
+        info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
+        info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
+        info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
+        info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
+        return .success(info)
+    }
 
     private static func postForm(path: String, fields: [String: String],
                                  completion: @escaping (Error?) -> Void) {
@@ -289,7 +329,7 @@ final class DeviceClient {
 
     // MARK: - pairing watchdog
 
-    /// Stamped on every device poll of our /status|/net|/music (see main.swift).
+    /// Stamped on every device poll of our /status|/net|/cpu (see main.swift).
     static var devicePollAt = Date.distantPast
 
     private static var healInFlight = false

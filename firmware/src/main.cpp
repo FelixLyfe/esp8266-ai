@@ -1,4 +1,4 @@
-// ESP8266 WiFi clock: shows local time plus live Claude Code / Codex CLI
+// ESP8266 AI clock: shows live Claude Code / Codex CLI / Cursor status
 // working status and usage quota, polled from a small bridge service that
 // runs on the developer's Mac (see ../bridge/bridge.py).
 //
@@ -17,6 +17,7 @@
 #include <AnimatedGIF.h>
 
 #include "config.h"
+#include "rotation_policy.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
 #include "img/claude_logo.h"
@@ -40,6 +41,7 @@ const char *CLAUDE_SPRITE_FILE = "/c.bin";
 const char *CODEX_SPRITE_FILE = "/x.bin";
 const char *CLAUDE_GIF_FILE = "/c.gif"; // raw upload, decoded then removed
 const char *CODEX_GIF_FILE = "/x.gif";
+const char *USB_TRANSFER_FILE = "/usb.tmp";
 const int MAX_CUSTOM_FRAMES = 8;
 const size_t CLAUDE_FRAME_BYTES = (size_t)CLAUDE_SPRITE_W * CLAUDE_SPRITE_H * 2;
 const size_t CODEX_FRAME_BYTES = (size_t)CODEX_SPRITE_W * CODEX_SPRITE_H * 2;
@@ -56,7 +58,7 @@ bool claudeCustom = false;
 int claudeCustomFrames = 0;
 bool codexCustom = false;
 int codexCustomFrames = 0;
-uint32_t spriteRev = 0; // bumped on upload/reset so the Mac mirror re-fetches
+uint32_t spriteRev = 2026071302UL; // default asset revision; bumped again on upload/reset
 
 const int SCREEN_CX = 120, SCREEN_CY = 120;
 const int RING_MARGIN = 4;      // inset from screen edge
@@ -66,20 +68,15 @@ const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
 const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
 
-enum ActiveApp { APP_CLAUDE, APP_CODEX };
-ActiveApp currentApp = APP_CLAUDE;
+enum ActiveApp { APP_CLAUDE, APP_CODEX, APP_CURSOR, APP_NONE };
+ActiveApp currentApp = APP_NONE;
 unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// net/music = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC };
+// net/cpu = show Mac-side telemetry pages instead of the pet.
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CURSOR, MODE_NET, MODE_CPU };
 DisplayMode displayMode = MODE_AUTO;
-
-// When AUTO and the Mac reports audio playing, the screen auto-switches to the
-// music page and back when it stops — same spirit as the Claude/Codex auto
-// switch. Only AUTO does this; a pinned mode is always honored as-is.
-bool statusMusicPlaying = false;
 DisplayMode lastEffectiveMode = MODE_AUTO;
 
 // ---------- net speed mode state ----------
@@ -95,9 +92,8 @@ long netQRx[NET_QUEUE], netQTx[NET_QUEUE]; // ring buffer of pending samples
 int netQHead = 0, netQCount = 0;
 long netSeq = -1;                          // last bridge sample seq consumed into the queue
 long netCurRx = 0, netCurTx = 0;           // smoothed readout for the header
-int netCpuPct = -1, netMemPct = -1;        // Mac CPU/MEM row; -1 = bridge sends none (hidden)
-String netLastCpuVal, netLastMemVal;       // change detection for the CPU/MEM values
-bool netSysLabelsDrawn = false;
+String netNetworkName = "Not connected";
+String netLastNetworkName;
 unsigned long lastNetPollMs = 0;
 unsigned long lastNetDrawMs = 0;
 bool netChromeDrawn = false;
@@ -109,23 +105,12 @@ long netHistRx[NET_CHART_W], netHistTx[NET_CHART_W]; // one 250ms sample per col
 long netScale = 10240;    // current "nice" full-scale value (whole chart shares it)
 String netLastDl, netLastUl, netLastScaleText; // change detection for partial redraws
 
-// ---------- music mode state ----------
-const int MUSIC_COVER_W = 128;
-const int MUSIC_COVER_H = 128;
-// Title/artist come as a Mac-rendered bitmap strip (232x44) because the
-// panel fonts are ASCII-only and CJK titles would render as blanks.
-const int MUSIC_TEXT_W = 232;
-const int MUSIC_TEXT_H = 44;
-const int MUSIC_TEXT_X = 4, MUSIC_TEXT_Y = 150;
-const unsigned long MUSIC_POLL_INTERVAL_MS = 2000;
-String musicTitle, musicArtist, musicAlbum;
-bool musicPlaying = false;
-int musicElapsed = 0, musicDuration = 0;
-int musicArtworkRev = -1;
-int musicTextRev = -1;
-bool musicHasArtwork = false;
-bool musicChromeDrawn = false;
-unsigned long lastMusicPollMs = 0;
+// ---------- CPU mode state ----------
+const unsigned long CPU_POLL_INTERVAL_MS = 1000;
+int cpuPct = 0;
+int cpuLastPct = -1;
+bool cpuChromeDrawn = false;
+unsigned long lastCpuPollMs = 0;
 
 int claudeFrame = 0;
 int codexFrame = 0;
@@ -148,6 +133,8 @@ struct ClaudeStatus {
   float sevenDayPct = -1;
   int sevenDayResetMin = -1; // minutes until the 7-day window resets
   bool needsInput = false; // waiting on a permission/approval prompt
+  bool eligible = false;
+  bool stale = false;
 };
 
 struct CodexStatus {
@@ -158,16 +145,36 @@ struct CodexStatus {
   float weeklyPct = -1;
   int weeklyResetMin = -1;
   bool needsInput = false;
+  bool eligible = false;
+  bool stale = false;
+};
+
+struct CursorStatus {
+  float totalPct = -1;
+  float autoPct = -1;
+  float apiPct = -1;
+  int billingResetMin = -1;
+  bool eligible = false;
+  bool stale = false;
 };
 
 ClaudeStatus claudeStatus;
 CodexStatus codexStatus;
+CursorStatus cursorStatus;
+bool accountsChecked = false;
 
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
 bool mainUiShown = false;      // false while the config-portal screen is up
 bool webServerStarted = false; // deferred: port 80 clashes with the portal
+bool webServerConfigured = false;
+
+bool wiredActive();
+String buildDeviceInfoJson();
+bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int targetH);
+void setupWebServer();
+void showMainUiIfNeeded();
 
 // ---------- backlight brightness ----------
 // The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
@@ -311,7 +318,30 @@ bool bridgeStale() {
 // True when the app currently on screen is waiting on a permission/approval
 // prompt — drives the red "look now, act" border flash.
 bool currentAppNeedsInput() {
-  return currentApp == APP_CLAUDE ? claudeStatus.needsInput : codexStatus.needsInput;
+  if (currentApp == APP_CLAUDE) return claudeStatus.needsInput;
+  if (currentApp == APP_CODEX) return codexStatus.needsInput;
+  return false;
+}
+
+bool appEligible(ActiveApp app) {
+  if (app == APP_CLAUDE) return claudeStatus.eligible;
+  if (app == APP_CODEX) return codexStatus.eligible;
+  if (app == APP_CURSOR) return cursorStatus.eligible;
+  return false;
+}
+
+bool appWorking(ActiveApp app) {
+  if (app == APP_CLAUDE) return claudeStatus.status == "working";
+  if (app == APP_CODEX) return codexStatus.status == "working";
+  if (app == APP_CURSOR) return false; // Cursor is quota-only; no work-state monitoring.
+  return false;
+}
+
+bool appStale(ActiveApp app) {
+  if (app == APP_CLAUDE) return claudeStatus.stale;
+  if (app == APP_CODEX) return codexStatus.stale;
+  if (app == APP_CURSOR) return cursorStatus.stale;
+  return false;
 }
 
 // Working vs idle is now conveyed by the sprite animation itself (moving vs
@@ -319,6 +349,7 @@ bool currentAppNeedsInput() {
 // bridge-stale which flashes red ("check it now") and overrides everything.
 uint16_t currentStatusColor() {
   if (bridgeStale()) return flashOn ? TFT_RED : TFT_BLACK;
+  if (currentApp == APP_CURSOR && cursorStatus.totalPct >= 99.9f) return TFT_RED;
   return TFT_GREEN;
 }
 
@@ -327,6 +358,7 @@ uint16_t currentStatusColor() {
 // ring area must invalidate this cache.
 float ringLastPct = -1000;
 uint16_t ringLastColor = 1;
+int lastNoAIState = -1;
 
 // Paints the full square border in one color (all four sides), used for the
 // attention flash so the whole edge blinks, not just the filled quota arc.
@@ -397,15 +429,19 @@ void drawCodexSprite(int frameIdx) {
 }
 
 String pctText(float pct) {
-  return pct >= 0 ? String((int)pct) + "%" : "-";
+  return pct >= 0 ? String((int)lroundf(constrain(pct, 0.0f, 100.0f))) + "%" : "-";
 }
 
-// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
+float remainingPct(float usedPct) {
+  return usedPct >= 0 ? constrain(100.0f - usedPct, 0.0f, 100.0f) : -1.0f;
+}
+
+// Quota readout below the sprite: two remaining-quota columns, small grey label
 // over a big font-4 percentage. Values repaint only when their text changes
 // (force = after a full-screen clear), so the 5s poll never flashes them.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
-String lastQuota5h, lastQuotaWk;
+String lastQuota5h, lastQuotaWk, lastQuotaLabel1, lastQuotaLabel2;
 
 // Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
 // a 1px x offset. Transparent draws - the caller must have cleared the region.
@@ -415,23 +451,29 @@ void drawBoldString(const String &s, int x, int y, int font, uint16_t color) {
   tft.drawString(s, x + 1, y, font);
 }
 
-void drawQuotaText(float hourPct, float weekPct, bool force) {
+void drawQuotaTextWithLabels(const String &label1, float pct1, const String &label2, float pct2, bool force) {
   tft.setTextDatum(TC_DATUM);
-  if (force) {
-    drawBoldString("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
-    drawBoldString("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
-  }
-  String v1 = pctText(hourPct), v2 = pctText(weekPct);
-  if (force || v1 != lastQuota5h) {
-    lastQuota5h = v1;
-    tft.fillRect(QUOTA_COL1_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
+  String v1 = pctText(pct1), v2 = pctText(pct2);
+  bool has1 = pct1 >= 0, has2 = pct2 >= 0;
+  bool changed = force || v1 != lastQuota5h || v2 != lastQuotaWk
+      || label1 != lastQuotaLabel1 || label2 != lastQuotaLabel2;
+  if (!changed) return;
+  lastQuota5h = v1; lastQuotaWk = v2;
+  lastQuotaLabel1 = label1; lastQuotaLabel2 = label2;
+  tft.fillRect(12, QUOTA_LABEL_Y, 216, 44, TFT_BLACK);
+  if (has1 && has2) {
+    drawBoldString(label1, QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    drawBoldString(label2, QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
     drawBoldString(v1, QUOTA_COL1_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
-  }
-  if (force || v2 != lastQuotaWk) {
-    lastQuotaWk = v2;
-    tft.fillRect(QUOTA_COL2_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
     drawBoldString(v2, QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+  } else if (has1 || has2) {
+    drawBoldString(has1 ? label1 : label2, SCREEN_CX, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    drawBoldString(has1 ? v1 : v2, SCREEN_CX, QUOTA_VALUE_Y, 4, TFT_WHITE);
   }
+}
+
+void drawQuotaText(float hourPct, float weekPct, bool force) {
+  drawQuotaTextWithLabels("5h LEFT", hourPct, "Wk LEFT", weekPct, force);
 }
 
 // ---------- quota-exhausted countdown ----------
@@ -443,22 +485,31 @@ void drawQuotaText(float hourPct, float weekPct, bool force) {
 enum CdType { CD_NONE, CD_5H, CD_WEEK };
 
 float currentHourPct() {
-  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourPct : codexStatus.primaryPct;
+  if (currentApp == APP_CLAUDE) return claudeStatus.fiveHourPct;
+  if (currentApp == APP_CODEX) return codexStatus.primaryPct;
+  return -1;
 }
 
 int currentHourResetMin() {
-  return currentApp == APP_CLAUDE ? claudeStatus.fiveHourResetMin : codexStatus.primaryResetMin;
+  if (currentApp == APP_CLAUDE) return claudeStatus.fiveHourResetMin;
+  if (currentApp == APP_CODEX) return codexStatus.primaryResetMin;
+  return -1;
 }
 
 float currentWeekPct() {
-  return currentApp == APP_CLAUDE ? claudeStatus.sevenDayPct : codexStatus.weeklyPct;
+  if (currentApp == APP_CLAUDE) return claudeStatus.sevenDayPct;
+  if (currentApp == APP_CODEX) return codexStatus.weeklyPct;
+  return -1;
 }
 
 int currentWeekResetMin() {
-  return currentApp == APP_CLAUDE ? claudeStatus.sevenDayResetMin : codexStatus.weeklyResetMin;
+  if (currentApp == APP_CLAUDE) return claudeStatus.sevenDayResetMin;
+  if (currentApp == APP_CODEX) return codexStatus.weeklyResetMin;
+  return -1;
 }
 
 CdType desiredCountdown() {
+  if (currentApp == APP_CURSOR || currentApp == APP_NONE) return CD_NONE;
   if (currentWeekPct() >= 99.9f && currentWeekResetMin() >= 0) return CD_WEEK;
   if (currentHourPct() >= 99.9f && currentHourResetMin() >= 0) return CD_5H;
   return CD_NONE;
@@ -524,7 +575,80 @@ void drawCountdown(bool force) {
 // through rowBuf, same as the sprite path.
 const int LOGO_X = 14, LOGO_Y = 18;
 
+// 49x56 one-bit mask rasterized from Cursor's SVG path. Keeping the source
+// aspect ratio makes the 40x40 top-left slot match Claude/Codex without
+// pulling a floating-point polygon rasterizer into the ESP8266 firmware.
+static const uint8_t cursorLogoBits[] = {
+  0x00,0x00,0x01,0xC0,0x00,0x00,0x00,0x00,0x03,0xF8,0x00,0x00,0x00,0x00,0x03,0xFE,
+  0x00,0x00,0x00,0x00,0x07,0xFF,0xC0,0x00,0x00,0x00,0x0F,0xFF,0xF8,0x00,0x00,0x00,
+  0x1F,0xFF,0xFF,0x00,0x00,0x00,0x1F,0xFF,0xFF,0xC0,0x00,0x00,0x3F,0xFF,0xFF,0xF8,
+  0x00,0x00,0x7F,0xFF,0xFF,0xFF,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xE0,0x00,0xFF,0xFF,
+  0xFF,0xFF,0xF8,0x01,0xFF,0xFF,0xFF,0xFF,0xFF,0x03,0xFF,0xFF,0xFF,0xFF,0xFF,0xE3,
+  0xFF,0xFF,0xFF,0xFF,0xFF,0xFB,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xC0,0x00,0x00,0x00,
+  0x00,0x07,0xF8,0x00,0x00,0x00,0x00,0x03,0xFE,0x00,0x00,0x00,0x00,0x01,0xFF,0xC0,
+  0x00,0x00,0x00,0x01,0xFF,0xF8,0x00,0x00,0x00,0x00,0xFF,0xFF,0x00,0x00,0x00,0x00,
+  0xFF,0xFF,0xC0,0x00,0x00,0x00,0xFF,0xFF,0xF8,0x00,0x00,0x00,0x7F,0xFF,0xFF,0x00,
+  0x00,0x00,0x7F,0xFF,0xFF,0xC0,0x00,0x00,0x3F,0xFF,0xFF,0xF8,0x00,0x00,0x3F,0xFF,
+  0xFF,0xFF,0x00,0x00,0x1F,0xFF,0xFF,0xFF,0xE0,0x00,0x1F,0xFF,0xFF,0xFF,0xF0,0x00,
+  0x1F,0xFF,0xFF,0xFF,0xF8,0x00,0x0F,0xFF,0xFF,0xFF,0xFC,0x00,0x0F,0xFF,0xFF,0xFF,
+  0xFE,0x00,0x07,0xFF,0xFF,0xFF,0xFF,0x00,0x07,0xFF,0xFF,0xFF,0xFF,0x80,0x03,0xFF,
+  0xFF,0xFF,0xFF,0xC0,0x03,0xFF,0xFF,0xFF,0xFF,0xE0,0x03,0xFF,0xFF,0xFF,0xFF,0xF0,
+  0x01,0xFF,0xFF,0xFF,0xFF,0xF8,0x01,0xFF,0xFF,0xFF,0xFF,0xFC,0x00,0xFF,0xFF,0xFF,
+  0xFF,0xFE,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x7F,0xFF,0xFF,0xFF,0xFF,0x80,0x7F,
+  0xFF,0xDF,0xFF,0xFF,0xC0,0x7F,0xFF,0xC7,0xFF,0xFF,0xE0,0x3F,0xFF,0xC0,0xFF,0xFF,
+  0xF0,0x3F,0xFF,0x80,0x1F,0xFF,0xF8,0x1F,0xFF,0x00,0x07,0xFF,0xFC,0x1F,0xFF,0x00,
+  0x00,0xFF,0xFE,0x1F,0xFE,0x00,0x00,0x1F,0xFF,0x0F,0xFC,0x00,0x00,0x03,0xFF,0x8F,
+  0xF8,0x00,0x00,0x00,0xFF,0xC7,0xF8,0x00,0x00,0x00,0x1F,0xE7,0xF0,0x00,0x00,0x00,
+  0x03,0xF3,0xE0,0x00,0x00,0x00,0x00,0x7F,0xC0,0x00,0x00,0x00,0x00,0x1F,0xC0,0x00,
+  0x00,0x00,0x00,0x03,0x80,0x00,0x00
+};
+static_assert(sizeof(cursorLogoBits) == 343, "Cursor logo mask must be 49x56 bits");
+
+void drawCursorMark(int cx, int cy, int size) {
+  const int width = (size * 49 + 28) / 56;
+  const int left = cx - width / 2;
+  const int top = cy - size / 2;
+  for (int y = 0; y < size; y++) {
+    int sourceY = y * 56 / size;
+    int runStart = -1;
+    for (int x = 0; x <= width; x++) {
+      bool on = false;
+      if (x < width) {
+        int sourceX = x * 49 / width;
+        int bit = sourceY * 49 + sourceX;
+        on = (cursorLogoBits[bit / 8] & (0x80 >> (bit & 7))) != 0;
+      }
+      if (on && runStart < 0) runStart = x;
+      if (!on && runStart >= 0) {
+        tft.fillRect(left + runStart, top + y, x - runStart, 1, TFT_WHITE);
+        runStart = -1;
+      }
+    }
+  }
+}
+
+void drawStaleTag() {
+  tft.fillRect(174, 16, 52, 16, TFT_BLACK);
+  if (!appStale(currentApp)) return;
+  tft.setTextDatum(TR_DATUM);
+  drawBoldString("STALE", 224, 17, 1, TFT_ORANGE);
+}
+
+void drawNoAIState(bool force = false) {
+  int state = accountsChecked ? 1 : 0;
+  if (!force && state == lastNoAIState) return;
+  lastNoAIState = state;
+  tft.fillScreen(TFT_BLACK);
+  ringLastPct = -1000;
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(accountsChecked ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
+  tft.drawString(accountsChecked ? "NO AI LOGIN" : "CHECKING ACCOUNTS...", SCREEN_CX, 112, 2);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("USB CONNECTED", SCREEN_CX, 139, 1);
+}
+
 void drawAppLogo() {
+  if (currentApp == APP_CURSOR || currentApp == APP_NONE) return;
   const uint16_t *logo = (currentApp == APP_CLAUDE) ? claude_logo_0 : codex_logo_0;
   int w = (currentApp == APP_CLAUDE) ? CLAUDE_LOGO_W : CODEX_LOGO_W;
   int h = (currentApp == APP_CLAUDE) ? CLAUDE_LOGO_H : CODEX_LOGO_H;
@@ -548,51 +672,71 @@ float claudeRingPct() {
 // Full clear + repaint - only for real transitions (app switch, mode return,
 // sprite change); steady-state data updates go through refreshActiveApp().
 void drawActiveApp() {
+  if (currentApp == APP_NONE) { drawNoAIState(true); return; }
+  lastNoAIState = -1;
   tft.fillScreen(TFT_BLACK);
   ringLastPct = -1000; // screen was cleared: force the ring repaint
   showingCd = desiredCountdown();
   if (showingCd != CD_NONE) syncCountdownDeadline();
   else cdDeadlineMs = 0;
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
+    drawSquareRing(remainingPct(claudeRingPct()), currentStatusColor());
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
-  } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawQuotaText(remainingPct(claudeRingPct()), remainingPct(claudeStatus.sevenDayPct), true);
+  } else if (currentApp == APP_CODEX) {
+    float ringUsedPct = codexStatus.primaryPct >= 0 ? codexStatus.primaryPct : codexStatus.weeklyPct;
+    drawSquareRing(max(remainingPct(ringUsedPct), 0.0f), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
+    drawQuotaText(remainingPct(codexStatus.primaryPct), remainingPct(codexStatus.weeklyPct), true);
+  } else {
+    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
+    drawCursorMark(SCREEN_CX, 105, 92);
+    drawQuotaTextWithLabels("AUTO LEFT", remainingPct(cursorStatus.autoPct),
+                            "API LEFT", remainingPct(cursorStatus.apiPct), true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
+  drawStaleTag();
 }
 
 // In-place refresh after a bridge poll: ring repaint + only the text that
 // actually changed. No fillScreen, so the 5s poll doesn't blank the screen.
 void refreshActiveApp() {
+  if (currentApp == APP_NONE) { drawNoAIState(); return; }
   if (desiredCountdown() != showingCd) { // pet <-> countdown (or 5h <-> weekly) swap
     drawActiveApp();
     return;
   }
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+    drawSquareRing(remainingPct(claudeRingPct()), currentStatusColor());
+    drawQuotaText(remainingPct(claudeRingPct()), remainingPct(claudeStatus.sevenDayPct), false);
+  } else if (currentApp == APP_CODEX) {
+    float ringUsedPct = codexStatus.primaryPct >= 0 ? codexStatus.primaryPct : codexStatus.weeklyPct;
+    drawSquareRing(max(remainingPct(ringUsedPct), 0.0f), currentStatusColor());
+    drawQuotaText(remainingPct(codexStatus.primaryPct), remainingPct(codexStatus.weeklyPct), false);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
+    drawQuotaTextWithLabels("AUTO LEFT", remainingPct(cursorStatus.autoPct),
+                            "API LEFT", remainingPct(cursorStatus.apiPct), false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
     drawCountdown(false);
   }
+  drawStaleTag();
 }
 
 // Redraws just the ring (cheap) - used for status color animation ticks
 // between full redraws.
 void redrawRingOnly() {
+  if (currentApp == APP_NONE) return;
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
+    drawSquareRing(remainingPct(claudeRingPct()), currentStatusColor());
+  } else if (currentApp == APP_CODEX) {
+    float ringUsedPct = codexStatus.primaryPct >= 0 ? codexStatus.primaryPct : codexStatus.weeklyPct;
+    drawSquareRing(max(remainingPct(ringUsedPct), 0.0f), currentStatusColor());
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
   }
 }
 
@@ -602,31 +746,24 @@ void redrawRingOnly() {
 //   - both working                  -> alternate every SWITCH_BOTH_MS (2s)
 //   - neither working               -> alternate slowly (SWITCH_IDLE_MS)
 bool updateActiveApp() {
-  ActiveApp desired = currentApp;
-
-  if (displayMode == MODE_CLAUDE) {
-    desired = APP_CLAUDE;
-  } else if (displayMode == MODE_CODEX) {
-    desired = APP_CODEX;
-  } else if (claudeStatus.needsInput && !codexStatus.needsInput) {
-    desired = APP_CLAUDE; // approval prompt wins the screen
-  } else if (codexStatus.needsInput && !claudeStatus.needsInput) {
-    desired = APP_CODEX;
-  } else {
-    bool claudeWorking = claudeStatus.status == "working";
-    bool codexWorking = codexStatus.status == "working";
-    if (claudeWorking && !codexWorking) {
-      desired = APP_CLAUDE;
-    } else if (codexWorking && !claudeWorking) {
-      desired = APP_CODEX;
-    } else {
-      unsigned long interval = (claudeWorking && codexWorking) ? SWITCH_BOTH_MS : SWITCH_IDLE_MS;
-      if (millis() - lastSwitchMs >= interval) {
-        lastSwitchMs = millis();
-        desired = (currentApp == APP_CLAUDE) ? APP_CODEX : APP_CLAUDE;
-      }
-    }
+  ActiveApp order[3] = {APP_CLAUDE, APP_CODEX, APP_CURSOR};
+  if ((displayMode == MODE_CLAUDE && !appEligible(APP_CLAUDE))
+      || (displayMode == MODE_CODEX && !appEligible(APP_CODEX))
+      || (displayMode == MODE_CURSOR && !appEligible(APP_CURSOR))) displayMode = MODE_AUTO;
+  bool eligible[3], working[3], needsInput[3] = {
+      claudeStatus.needsInput, codexStatus.needsInput, false};
+  int workingCount = 0;
+  for (int i = 0; i < 3; i++) {
+    eligible[i] = appEligible(order[i]);
+    working[i] = appWorking(order[i]);
+    if (eligible[i] && working[i]) workingCount++;
   }
+  int pinned = displayMode == MODE_CLAUDE ? APP_CLAUDE
+      : displayMode == MODE_CODEX ? APP_CODEX : displayMode == MODE_CURSOR ? APP_CURSOR : -1;
+  unsigned long interval = workingCount > 1 ? SWITCH_BOTH_MS : SWITCH_IDLE_MS;
+  bool rotateNow = millis() - lastSwitchMs >= interval;
+  ActiveApp desired = (ActiveApp)RotationPolicy::choose(eligible, working, needsInput,
+      pinned, (int)currentApp, rotateNow);
 
   if (desired != currentApp) {
     currentApp = desired;
@@ -637,6 +774,8 @@ bool updateActiveApp() {
 }
 
 // ---------- net speed screen ----------
+
+String fitText(String s, int maxPx, int font);
 
 String speedText(long bps) {
   char buf[16];
@@ -657,9 +796,7 @@ void resetNetChart() {
   netLastDl = "";
   netLastUl = "";
   netLastScaleText = "";
-  netLastCpuVal = "";
-  netLastMemVal = "";
-  netSysLabelsDrawn = false;
+  netLastNetworkName = "";
   netQHead = 0;
   netQCount = 0;
   netSeq = -1;
@@ -681,46 +818,16 @@ void drawNetChrome() {
   tft.drawString("DOWN", 14, 10, 1);
   tft.drawString("UP", 134, 10, 1);
   tft.setTextDatum(TC_DATUM);
-  tft.drawString("MAC NET  -  56s", SCREEN_CX, 226, 1); // below the CPU/MEM row
+  tft.drawString("MAC NET  -  56s", SCREEN_CX, 226, 1);
 }
 
-// Mac CPU / memory usage row between the chart and the footer: small grey
-// labels at fixed positions, big font-4 values left-aligned at fixed x so a
-// width change (5% -> 30%) never shifts the rest of the row around.
-// Hidden only if an old bridge doesn't send the fields yet.
-const int NET_SYS_Y = 192;                          // row top (26px tall, font 4)
-const int NET_CPU_LABEL_X = 28, NET_CPU_VAL_X = 62; // value region 62..126 ("100%" = 63px)
-const int NET_MEM_LABEL_X = 130, NET_MEM_VAL_X = 164;
-
-void drawNetSysinfoIfChanged() {
-  if (netCpuPct < 0) {
-    if (netSysLabelsDrawn) { // bridge stopped sending: erase the whole row
-      tft.fillRect(0, NET_SYS_Y, SCREEN_W, 26, TFT_BLACK);
-      netSysLabelsDrawn = false;
-      netLastCpuVal = "";
-      netLastMemVal = "";
-    }
-    return;
-  }
-  tft.setTextDatum(TL_DATUM);
-  if (!netSysLabelsDrawn) {
-    netSysLabelsDrawn = true;
-    tft.setTextColor(0x7BEF, TFT_BLACK);
-    tft.drawString("CPU", NET_CPU_LABEL_X, NET_SYS_Y + 6, 2);
-    tft.drawString("MEM", NET_MEM_LABEL_X, NET_SYS_Y + 6, 2);
-  }
-  String c = String(netCpuPct) + "%", m = String(netMemPct) + "%";
+void drawNetNetworkIfChanged() {
+  if (netNetworkName == netLastNetworkName) return;
+  netLastNetworkName = netNetworkName;
+  tft.fillRect(8, 192, 224, 24, TFT_BLACK);
+  tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  if (c != netLastCpuVal) {
-    netLastCpuVal = c;
-    tft.fillRect(NET_CPU_VAL_X, NET_SYS_Y, 64, 26, TFT_BLACK);
-    tft.drawString(c, NET_CPU_VAL_X, NET_SYS_Y, 4);
-  }
-  if (m != netLastMemVal) {
-    netLastMemVal = m;
-    tft.fillRect(NET_MEM_VAL_X, NET_SYS_Y, 64, 26, TFT_BLACK);
-    tft.drawString(m, NET_MEM_VAL_X, NET_SYS_Y, 4);
-  }
+  tft.drawString(fitText(netNetworkName, 216, 2), SCREEN_CX, 196, 2);
 }
 
 // Header readouts (1s-averaged), each repainted only when its text changes.
@@ -827,7 +934,7 @@ void netDrawTick() {
   }
   if (netHeaderDirty) {
     drawNetHeaderIfChanged();
-    drawNetSysinfoIfChanged();
+    drawNetNetworkIfChanged();
     netHeaderDirty = false;
   }
   if (netQCount == 0) return;
@@ -851,8 +958,7 @@ bool handleNetPayload(const String &payload) {
   if (deserializeJson(doc, payload)) return false;
   netCurRx = doc["rx_bps"] | 0L;
   netCurTx = doc["tx_bps"] | 0L;
-  netCpuPct = doc["cpu_pct"] | -1;
-  netMemPct = doc["mem_pct"] | -1;
+  netNetworkName = doc["network_name"] | "Not connected";
   netHeaderDirty = true;
   long seq = doc["seq"] | -1L;
   JsonArray rx = doc["rx"], tx = doc["tx"];
@@ -884,13 +990,6 @@ void pollNet() {
   http.end();
 }
 
-String timeText(int sec) {
-  if (sec < 0) sec = 0;
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%d:%02d", sec / 60, sec % 60);
-  return String(buf);
-}
-
 String fitText(String s, int maxPx, int font) {
   if (tft.textWidth(s, font) <= maxPx) return s;
   while (s.length() > 0 && tft.textWidth(s + "...", font) > maxPx) {
@@ -899,152 +998,57 @@ String fitText(String s, int maxPx, int font) {
   return s + "...";
 }
 
-void drawMusicCoverPlaceholder() {
-  const int x = (SCREEN_W - MUSIC_COVER_W) / 2;
-  const int y = 14;
-  tft.fillRect(x, y, MUSIC_COVER_W, MUSIC_COVER_H, TFT_DARKGREY);
-  tft.drawRect(x, y, MUSIC_COVER_W, MUSIC_COVER_H, TFT_DARKGREY);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_DARKGREY);
-  tft.drawString("No Art", SCREEN_CX, y + MUSIC_COVER_H / 2, 2);
-}
-
-bool drawMusicCoverFromBridge() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0 || !musicHasArtwork) return false;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/music/cover.raw";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return false;
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    http.end();
-    return false;
-  }
-  WiFiClient *stream = http.getStreamPtr();
-  const int x = (SCREEN_W - MUSIC_COVER_W) / 2;
-  const int y = 14;
-  const size_t rowBytes = (size_t)MUSIC_COVER_W * 2;
-  bool ok = true;
-  for (int r = 0; r < MUSIC_COVER_H; r++) {
-    int got = stream->readBytes((uint8_t *)rowBuf, rowBytes);
-    if (got != (int)rowBytes) {
-      ok = false;
-      break;
-    }
-    tft.pushImage(x, y + r, MUSIC_COVER_W, 1, rowBuf);
-    yield();
-  }
-  http.end();
-  return ok;
-}
-
-// Streams the Mac-rendered 232x44 title/artist strip and blits it row by
-// row — the only way to get CJK on screen without shipping a font.
-bool drawMusicTextFromBridge() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/music/text.raw";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return false;
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    http.end();
-    return false;
-  }
-  WiFiClient *stream = http.getStreamPtr();
-  const size_t rowBytes = (size_t)MUSIC_TEXT_W * 2;
-  bool ok = true;
-  for (int r = 0; r < MUSIC_TEXT_H; r++) {
-    int got = stream->readBytes((uint8_t *)rowBuf, rowBytes);
-    if (got != (int)rowBytes) {
-      ok = false;
-      break;
-    }
-    tft.pushImage(MUSIC_TEXT_X, MUSIC_TEXT_Y + r, MUSIC_TEXT_W, 1, rowBuf);
-    yield();
-  }
-  http.end();
-  return ok;
-}
-
-// ASCII-only fallback if the strip fetch fails (CJK will stay blank, but at
-// least latin titles show something).
-void drawMusicTextFallback() {
-  tft.fillRect(MUSIC_TEXT_X, MUSIC_TEXT_Y, MUSIC_TEXT_W, MUSIC_TEXT_H, TFT_BLACK);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  String title = musicTitle.length() ? musicTitle : "No Music";
-  tft.drawString(fitText(title, 216, 2), SCREEN_CX, MUSIC_TEXT_Y + 4, 2);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(fitText(musicArtist, 216, 2), SCREEN_CX, MUSIC_TEXT_Y + 24, 2);
-}
-
-// Regions repaint independently: cover / text strip only when their rev
-// changes, progress bar + time on every poll (partial fill, no flicker
-// elsewhere).
-void drawMusicScreen(bool coverChanged, bool textChanged) {
-  if (!musicChromeDrawn) {
+void drawCPUScreen() {
+  if (!cpuChromeDrawn) {
     tft.fillScreen(TFT_BLACK);
-    coverChanged = true;
-    textChanged = true;
-    musicChromeDrawn = true;
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString("MAC CPU", SCREEN_CX, 22, 4);
+    tft.drawString("SYSTEM LOAD", SCREEN_CX, 202, 2);
+    cpuChromeDrawn = true;
+    cpuLastPct = -1;
   }
-  if (coverChanged) {
-    if (!drawMusicCoverFromBridge()) drawMusicCoverPlaceholder();
-  }
-  if (textChanged) {
-    if (!drawMusicTextFromBridge()) drawMusicTextFallback();
-  }
-
-  const int bx = 20, by = 204, bw = 200, bh = 8;
-  tft.fillRect(0, by - 2, SCREEN_W, SCREEN_H - by + 2, TFT_BLACK);
-  tft.fillRect(bx, by, bw, bh, TFT_DARKGREY);
-  float progress = musicDuration > 0 ? (float)musicElapsed / (float)musicDuration : 0;
-  if (progress < 0) progress = 0;
-  if (progress > 1) progress = 1;
-  uint16_t color = musicPlaying ? TFT_GREEN : TFT_LIGHTGREY;
-  tft.fillRect(bx, by, (int)(bw * progress), bh, color);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, 220, 1);
+  if (cpuPct == cpuLastPct) return;
+  cpuLastPct = cpuPct;
+  uint16_t color = cpuPct >= 85 ? TFT_RED : cpuPct >= 60 ? TFT_YELLOW : TFT_GREEN;
+  tft.fillRect(0, 58, SCREEN_W, 86, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.drawString(String(cpuPct) + "%", SCREEN_CX, 100, 4);
+  tft.setTextSize(1);
+  const int bx = 20, by = 160, bw = 200, bh = 18;
+  tft.fillRect(bx, by, bw, bh, 0x3186);
+  tft.fillRect(bx, by, bw * cpuPct / 100, bh, color);
 }
 
-void pollMusic() {
+bool handleCPUPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  cpuPct = constrain(doc["cpu_pct"] | 0, 0, 100);
+  if (displayMode == MODE_CPU) drawCPUScreen();
+  return true;
+}
+
+void pollCPU() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
   HTTPClient http;
-  String url = "http://" + bridgeHost + "/music";
+  String url = "http://" + bridgeHost + "/cpu";
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    JsonDocument doc;
-    if (!deserializeJson(doc, http.getString())) {
-      musicTitle = doc["title"] | "";
-      musicArtist = doc["artist"] | "";
-      musicAlbum = doc["album"] | "";
-      musicPlaying = doc["playing"] | false;
-      statusMusicPlaying = musicPlaying; // fast stop-detection while music shows
-      musicElapsed = doc["elapsed"] | 0;
-      musicDuration = doc["duration"] | 0;
-      musicHasArtwork = doc["has_artwork"] | false;
-      int rev = doc["artwork_rev"] | -1;
-      bool coverChanged = rev != musicArtworkRev;
-      musicArtworkRev = rev;
-      int tRev = doc["text_rev"] | -1;
-      bool textChanged = tRev != musicTextRev;
-      musicTextRev = tRev;
-      drawMusicScreen(coverChanged, textChanged);
-    }
-  }
+  if (code == HTTP_CODE_OK) handleCPUPayload(http.getString());
   http.end();
 }
 
 // ---------- WiFi / bridge polling ----------
 
-WiFiManager wifiManager; // global: the config portal now runs non-blocking in loop()
+WiFiManager wifiManager;
+enum WiFiFallbackState { WIFI_FALLBACK_OFF, WIFI_FALLBACK_CONNECTING, WIFI_FALLBACK_PORTAL, WIFI_FALLBACK_CONNECTED };
+WiFiFallbackState wifiFallbackState = WIFI_FALLBACK_OFF;
+unsigned long wifiFallbackStartedMs = 0;
+unsigned long bootMs = 0;
 
 void configModeCallback(WiFiManager *wm) {
   tft.fillScreen(TFT_BLACK);
@@ -1063,24 +1067,60 @@ void configModeCallback(WiFiManager *wm) {
   tft.drawString("Firmware v" FW_VERSION, 8, 215, 2);
 }
 
-// Non-blocking: with saved credentials this still waits ~10s for the join,
-// but a missing/failed WiFi no longer traps boot in the portal - the portal
-// keeps running from loop() while the USB serial link can take over the
-// screen (wired mode for APs with client isolation).
-void setupWiFi() {
+void beginWiFiFallback() {
+  if (wifiFallbackState != WIFI_FALLBACK_OFF) return;
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setConfigPortalBlocking(false);
-
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(); // reconnect the credentials already stored by WiFiManager
+  wifiFallbackState = WIFI_FALLBACK_CONNECTING;
+  wifiFallbackStartedMs = millis();
+  mainUiShown = false;
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Connecting WiFi...", 8, 100, 2);
+  tft.drawString("USB disconnected", 8, 75, 2);
+  tft.drawString("Connecting WiFi fallback...", 8, 105, 2);
+}
 
-  Serial.println("[wifi] starting WiFiManager autoConnect (non-blocking portal)...");
-  bool ok = wifiManager.autoConnect(WIFI_PORTAL_AP_NAME);
-  Serial.printf("[wifi] autoConnect result=%d ssid=%s ip=%s\n", ok, WiFi.SSID().c_str(),
-                WiFi.localIP().toString().c_str());
-  Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
+void stopWiFiFallbackForUSB() {
+  if (wifiFallbackState == WIFI_FALLBACK_OFF) return;
+  if (wifiFallbackState == WIFI_FALLBACK_PORTAL) wifiManager.stopConfigPortal();
+  if (webServerStarted) {
+    webServer.stop();
+    webServerStarted = false;
+  }
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_OFF);
+  wifiFallbackState = WIFI_FALLBACK_OFF;
+}
+
+void serviceWiFiFallback() {
+  if (wiredActive()) {
+    stopWiFiFallbackForUSB();
+    return;
+  }
+  if (wifiFallbackState == WIFI_FALLBACK_OFF) {
+    if (millis() - bootMs >= 5000UL) beginWiFiFallback();
+    return;
+  }
+  if (wifiFallbackState == WIFI_FALLBACK_PORTAL) wifiManager.process();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wifiFallbackState == WIFI_FALLBACK_PORTAL) wifiManager.stopConfigPortal();
+    wifiFallbackState = WIFI_FALLBACK_CONNECTED;
+    if (!webServerStarted) {
+      setupWebServer();
+      webServerStarted = true;
+      showMainUiIfNeeded();
+      lastPollMs = 0;
+    }
+    return;
+  }
+  if (wifiFallbackState == WIFI_FALLBACK_CONNECTING && millis() - wifiFallbackStartedMs >= 10000UL) {
+    WiFi.disconnect(false);
+    wifiManager.startConfigPortal(WIFI_PORTAL_AP_NAME);
+    wifiFallbackState = WIFI_FALLBACK_PORTAL;
+  }
 }
 
 bool parseStatusJson(const String &payload) {
@@ -1099,6 +1139,8 @@ bool parseStatusJson(const String &payload) {
     claudeStatus.sevenDayPct = c["seven_day_pct"] | -1.0;
     claudeStatus.sevenDayResetMin = c["seven_day_reset_min"] | -1;
     claudeStatus.needsInput = c["needs_input"] | false;
+    claudeStatus.eligible = c["eligible"] | false;
+    claudeStatus.stale = c["stale"] | false;
   }
 
   JsonObject x = doc["codex"];
@@ -1110,21 +1152,26 @@ bool parseStatusJson(const String &payload) {
     codexStatus.weeklyPct = x["weekly_pct"] | -1.0;
     codexStatus.weeklyResetMin = x["weekly_reset_min"] | -1;
     codexStatus.needsInput = x["needs_input"] | false;
+    codexStatus.eligible = x["eligible"] | false;
+    codexStatus.stale = x["stale"] | false;
   }
-  statusMusicPlaying = doc["music_playing"] | false;
+  JsonObject r = doc["cursor"];
+  if (!r.isNull()) {
+    cursorStatus.totalPct = r["total_pct"] | -1.0;
+    cursorStatus.autoPct = r["auto_pct"] | -1.0;
+    cursorStatus.apiPct = r["api_pct"] | -1.0;
+    cursorStatus.billingResetMin = r["billing_reset_min"] | -1;
+    cursorStatus.eligible = r["eligible"] | false;
+    cursorStatus.stale = r["stale"] | false;
+  }
+  accountsChecked = doc["accounts_checked"] | false;
+  if ((displayMode == MODE_CLAUDE && !claudeStatus.eligible)
+      || (displayMode == MODE_CODEX && !codexStatus.eligible)
+      || (displayMode == MODE_CURSOR && !cursorStatus.eligible)) displayMode = MODE_AUTO;
   return true;
 }
 
-// The mode actually rendered. In AUTO: a pending approval prompt wins (stay on
-// the pet so its border can flash red at you), otherwise audio promotes to the
-// music page.
 DisplayMode effectiveMode() {
-  if (displayMode == MODE_AUTO) {
-    if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
-    // music page needs HTTP for cover/text bitmaps, so don't auto-promote
-    // when running wired-only (no WiFi)
-    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
-  }
   return displayMode;
 }
 
@@ -1162,7 +1209,7 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_MUSIC) {
+  if (eff != MODE_NET && eff != MODE_CPU) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1170,20 +1217,76 @@ void pollBridge() {
   }
 }
 
-// ---------- wired (USB serial) bridge link ----------
-// Fallback for WiFi networks with client isolation (device can't reach the
-// bridge over LAN) - or for skipping WiFi setup entirely: when the clock is
-// plugged into the computer over USB, the bridge pushes the same /status and
-// /net payloads down the CH340 serial line as newline-terminated frames:
-//   bridge -> device:  #HELLO   #STATUS {json}   #NET {json}   #CMD {json}
-//   device -> bridge:  #DEVICE {"name":"aiclock","fw":"x.y.z"}
-// Everything else the device prints (logs) is ignored by the bridge.
-unsigned long lastSerialFrameMs = 0;
-bool wiredEverLinked = false;
-char serialLine[1600]; // biggest frame is #STATUS at ~600 bytes
-size_t serialLineLen = 0;
+// ---------- USB serial protocol ----------
+// Frame: A5 5A | version | type | seq LE | length LE | payload | CRC32 LE.
+// CRC covers version through payload. Structured payloads are JSON; files and
+// RGB565 resources are transferred as acknowledged binary chunks.
+enum USBMessage : uint8_t {
+  USB_HELLO = 0x01, USB_HELLO_ACK = 0x02, USB_HEARTBEAT = 0x03, USB_HEARTBEAT_ACK = 0x04,
+  USB_STATUS = 0x10, USB_NET = 0x11, USB_CPU = 0x12,
+  USB_GET_INFO = 0x20, USB_DEVICE_INFO = 0x21, USB_COMMAND = 0x22, USB_GET_RESOURCE = 0x23,
+  USB_RESOURCE_BEGIN = 0x30, USB_RESOURCE_CHUNK = 0x31, USB_RESOURCE_END = 0x32, USB_ACK = 0x7E
+};
+enum USBResource : uint8_t {
+  USB_CLAUDE_GIF = 3, USB_CODEX_GIF = 4,
+  USB_CLAUDE_SPRITE = 5, USB_CODEX_SPRITE = 6
+};
+const uint8_t USB_MAGIC_0 = 0xA5, USB_MAGIC_1 = 0x5A, USB_PROTOCOL_VERSION = 1;
+const size_t USB_MAX_PAYLOAD = 1024;
+const unsigned long USB_LINK_TIMEOUT_MS = 5000;
+unsigned long lastUSBFrameMs = 0;
+bool usbEverLinked = false;
+uint8_t usbPayload[USB_MAX_PAYLOAD];
+uint8_t usbHeader[8];
+size_t usbHeaderLen = 0, usbPayloadLen = 0, usbExpectedLen = 0, usbCrcLen = 0;
+uint8_t usbCrcBytes[4];
 
-bool wiredActive() { return wiredEverLinked && (millis() - lastSerialFrameMs) < 15000UL; }
+File usbTransferFile;
+uint8_t usbTransferResource = 0;
+uint8_t usbLastCompletedResource = 0;
+uint32_t usbTransferExpected = 0, usbTransferReceived = 0;
+
+bool wiredActive() { return usbEverLinked && (millis() - lastUSBFrameMs) < USB_LINK_TIMEOUT_MS; }
+
+uint32_t usbCRC32Update(uint32_t crc, uint8_t byte) {
+  crc ^= byte;
+  for (int bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320UL : 0);
+  return crc;
+}
+
+uint32_t usbCRC32(const uint8_t *header, const uint8_t *payload, size_t len) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (int i = 2; i < 8; i++) crc = usbCRC32Update(crc, header[i]);
+  for (size_t i = 0; i < len; i++) crc = usbCRC32Update(crc, payload[i]);
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+void usbSendFrame(uint8_t type, uint16_t seq, const uint8_t *payload, uint16_t len) {
+  uint8_t header[8] = {USB_MAGIC_0, USB_MAGIC_1, USB_PROTOCOL_VERSION, type,
+                       (uint8_t)(seq & 0xFF), (uint8_t)(seq >> 8),
+                       (uint8_t)(len & 0xFF), (uint8_t)(len >> 8)};
+  uint32_t crc = usbCRC32(header, payload, len);
+  Serial.write(header, sizeof(header));
+  if (len) Serial.write(payload, len);
+  uint8_t tail[4] = {(uint8_t)crc, (uint8_t)(crc >> 8), (uint8_t)(crc >> 16), (uint8_t)(crc >> 24)};
+  Serial.write(tail, sizeof(tail));
+}
+
+void usbSendString(uint8_t type, uint16_t seq, const String &value) {
+  usbSendFrame(type, seq, (const uint8_t *)value.c_str(), min(value.length(), USB_MAX_PAYLOAD));
+}
+
+void usbSendAck(uint16_t seq, uint8_t status = 0) {
+  uint8_t payload[3] = {(uint8_t)(seq & 0xFF), (uint8_t)(seq >> 8), status};
+  usbSendFrame(USB_ACK, 0, payload, sizeof(payload));
+}
+
+String usbPayloadString(const uint8_t *payload, size_t len) {
+  String value;
+  value.reserve(len);
+  for (size_t i = 0; i < len; i++) value += (char)payload[i];
+  return value;
+}
 
 // First data over either transport replaces the boot/portal screen.
 void showMainUiIfNeeded() {
@@ -1194,67 +1297,218 @@ void showMainUiIfNeeded() {
   drawActiveApp();
 }
 
-void handleSerialFrame(char *line) {
-  lastSerialFrameMs = millis();
-  wiredEverLinked = true;
-  if (!strncmp(line, "#HELLO", 6)) {
-    Serial.printf("#DEVICE {\"name\":\"aiclock\",\"fw\":\"%s\"}\n", FW_VERSION);
-    return;
+void resetSpriteFromUSB(ActiveApp slot) {
+  const char *path = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  LittleFS.remove(path);
+  spriteRev++;
+  loadCustomSpriteState();
+  if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+  if (currentApp == slot) drawActiveApp();
+}
+
+bool handleUSBCommand(const uint8_t *payload, size_t len) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload, len)) return false;
+  if (doc["brightness"].is<int>()) {
+    brightness = constrain(doc["brightness"].as<int>(), 0, 100);
+    applyBrightness();
+    saveBrightness();
   }
-  if (!strncmp(line, "#STATUS ", 8)) {
-    if (parseStatusJson(String(line + 8))) {
-      lastSuccessMs = millis();
-      everPolled = true;
-      showMainUiIfNeeded();
+  const char *mode = doc["display"] | (const char *)nullptr;
+  if (mode) {
+    String m(mode);
+    if (m == "auto") displayMode = MODE_AUTO;
+    else if (m == "claude") displayMode = MODE_CLAUDE;
+    else if (m == "codex") displayMode = MODE_CODEX;
+    else if (m == "cursor") displayMode = MODE_CURSOR;
+    else if (m == "net") displayMode = MODE_NET;
+    else if (m == "cpu") displayMode = MODE_CPU;
+    else return false;
+  }
+  const char *bridge = doc["bridge"] | (const char *)nullptr;
+  if (bridge) { bridgeHost = bridge; bridgeHost.trim(); saveBridgeHost(bridgeHost); }
+  const char *reset = doc["reset_sprite"] | (const char *)nullptr;
+  if (reset) {
+    if (!strcmp(reset, "claude")) resetSpriteFromUSB(APP_CLAUDE);
+    else if (!strcmp(reset, "codex")) resetSpriteFromUSB(APP_CODEX);
+    else return false;
+  }
+  return true;
+}
+
+const char *usbTransferTarget(uint8_t resource) {
+  if (resource == USB_CLAUDE_GIF) return CLAUDE_GIF_FILE;
+  if (resource == USB_CODEX_GIF) return CODEX_GIF_FILE;
+  return nullptr;
+}
+
+bool beginUSBTransfer(const uint8_t *payload, size_t len) {
+  if (len < 5 || !usbTransferTarget(payload[0])) return false;
+  if (usbTransferFile) usbTransferFile.close();
+  LittleFS.remove(USB_TRANSFER_FILE);
+  usbTransferResource = payload[0];
+  usbLastCompletedResource = 0;
+  usbTransferExpected = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8)
+      | ((uint32_t)payload[3] << 16) | ((uint32_t)payload[4] << 24);
+  usbTransferReceived = 0;
+  usbTransferFile = LittleFS.open(USB_TRANSFER_FILE, "w");
+  return (bool)usbTransferFile;
+}
+
+bool appendUSBTransfer(const uint8_t *payload, size_t len) {
+  if (len < 5 || !usbTransferFile || payload[0] != usbTransferResource) return false;
+  uint32_t offset = (uint32_t)payload[1] | ((uint32_t)payload[2] << 8)
+      | ((uint32_t)payload[3] << 16) | ((uint32_t)payload[4] << 24);
+  // An ACK can be lost even though the block was committed. Accept an exact
+  // duplicate range so the Mac can retry that block without restarting.
+  if (offset < usbTransferReceived && offset + len - 5 <= usbTransferReceived) return true;
+  if (offset != usbTransferReceived || usbTransferReceived + len - 5 > usbTransferExpected) return false;
+  size_t written = usbTransferFile.write(payload + 5, len - 5);
+  usbTransferReceived += written;
+  return written == len - 5;
+}
+
+bool finishUSBTransfer(uint8_t resource) {
+  if (!usbTransferFile && resource == usbLastCompletedResource) return true;
+  if (!usbTransferFile || resource != usbTransferResource) return false;
+  usbTransferFile.close();
+  if (usbTransferReceived != usbTransferExpected) { LittleFS.remove(USB_TRANSFER_FILE); return false; }
+  const char *target = usbTransferTarget(resource);
+  LittleFS.remove(target);
+  if (!LittleFS.rename(USB_TRANSFER_FILE, target)) return false;
+  bool ok = true;
+  if (resource == USB_CLAUDE_GIF || resource == USB_CODEX_GIF) {
+    ActiveApp slot = resource == USB_CLAUDE_GIF ? APP_CLAUDE : APP_CODEX;
+    const char *binPath = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+    int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
+    int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+    ok = decodeGifToBin(target, binPath, w, h);
+    LittleFS.remove(target);
+    if (ok) {
+      spriteRev++;
+      loadCustomSpriteState();
+      if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+      if (currentApp == slot) drawActiveApp();
+    }
+  }
+  usbTransferResource = 0;
+  usbLastCompletedResource = resource;
+  usbTransferExpected = usbTransferReceived = 0;
+  return ok;
+}
+
+void sendSpriteResource(uint16_t seq, USBResource resource) {
+  ActiveApp slot = resource == USB_CODEX_SPRITE ? APP_CODEX : APP_CLAUDE;
+  bool custom = slot == APP_CLAUDE ? claudeCustom : codexCustom;
+  const char *path = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  int frames = slot == APP_CLAUDE ? claudeFrameCount() : codexFrameCount();
+  int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
+  int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  size_t frameBytes = (size_t)w * h * 2;
+  uint32_t total = 1 + (uint32_t)frames * frameBytes;
+  uint8_t begin[5] = {(uint8_t)resource, (uint8_t)total, (uint8_t)(total >> 8),
+                      (uint8_t)(total >> 16), (uint8_t)(total >> 24)};
+  usbSendFrame(USB_RESOURCE_BEGIN, seq, begin, sizeof(begin));
+  File file;
+  if (custom) file = LittleFS.open(path, "r");
+  const uint16_t *const *progmemFrames = slot == APP_CLAUDE ? claude_sprite_frames : codex_sprite_frames;
+  uint8_t chunk[USB_MAX_PAYLOAD];
+  uint32_t offset = 0;
+  while (offset < total) {
+    size_t count = min((uint32_t)(USB_MAX_PAYLOAD - 5), total - offset);
+    chunk[0] = (uint8_t)resource;
+    chunk[1] = (uint8_t)offset; chunk[2] = (uint8_t)(offset >> 8);
+    chunk[3] = (uint8_t)(offset >> 16); chunk[4] = (uint8_t)(offset >> 24);
+    if (custom) {
+      file.seek(offset);
+      file.read(chunk + 5, count);
+    } else {
+      for (size_t i = 0; i < count; i++) {
+        uint32_t pos = offset + i;
+        if (pos == 0) chunk[5 + i] = (uint8_t)frames;
+        else {
+          pos--;
+          int frame = pos / frameBytes;
+          size_t inFrame = pos % frameBytes;
+          chunk[5 + i] = pgm_read_byte(((const uint8_t *)progmemFrames[frame]) + inFrame);
+        }
+      }
+    }
+    usbSendFrame(USB_RESOURCE_CHUNK, seq, chunk, count + 5);
+    offset += count;
+    yield();
+  }
+  if (file) file.close();
+  uint8_t end = (uint8_t)resource;
+  usbSendFrame(USB_RESOURCE_END, seq, &end, 1);
+}
+
+void handleUSBFrame(uint8_t type, uint16_t seq, const uint8_t *payload, size_t len) {
+  lastUSBFrameMs = millis();
+  usbEverLinked = true;
+  if (type == USB_HELLO) { usbSendString(USB_HELLO_ACK, seq, buildDeviceInfoJson()); return; }
+  if (type == USB_HEARTBEAT) { usbSendFrame(USB_HEARTBEAT_ACK, seq, nullptr, 0); return; }
+  if (type == USB_STATUS) {
+    if (parseStatusJson(usbPayloadString(payload, len))) {
+      lastSuccessMs = millis(); everPolled = true; showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_MUSIC) {
-        if (updateActiveApp()) drawActiveApp();
-        else refreshActiveApp();
+      if (eff != MODE_NET && eff != MODE_CPU) {
+        if (updateActiveApp()) drawActiveApp(); else refreshActiveApp();
       }
     }
     return;
   }
-  if (!strncmp(line, "#NET ", 5)) {
-    handleNetPayload(String(line + 5));
+  if (type == USB_NET) { handleNetPayload(usbPayloadString(payload, len)); return; }
+  if (type == USB_CPU) { handleCPUPayload(usbPayloadString(payload, len)); return; }
+  if (type == USB_GET_INFO) { usbSendString(USB_DEVICE_INFO, seq, buildDeviceInfoJson()); return; }
+  if (type == USB_COMMAND) { usbSendAck(seq, handleUSBCommand(payload, len) ? 0 : 1); return; }
+  if (type == USB_RESOURCE_BEGIN) { usbSendAck(seq, beginUSBTransfer(payload, len) ? 0 : 1); return; }
+  if (type == USB_RESOURCE_CHUNK) { usbSendAck(seq, appendUSBTransfer(payload, len) ? 0 : 1); return; }
+  if (type == USB_RESOURCE_END) {
+    bool ok = len == 1 && finishUSBTransfer(payload[0]);
+    usbSendAck(seq, ok ? 0 : 1);
     return;
   }
-  if (!strncmp(line, "#CMD ", 5)) {
-    JsonDocument doc;
-    if (deserializeJson(doc, line + 5)) return;
-    if (doc["brightness"].is<int>()) {
-      brightness = constrain(doc["brightness"].as<int>(), 0, 100);
-      applyBrightness();
-      saveBrightness();
-    }
-    const char *mode = doc["display"] | (const char *)nullptr;
-    if (mode) {
-      String m(mode);
-      if (m == "auto") displayMode = MODE_AUTO;
-      else if (m == "claude") displayMode = MODE_CLAUDE;
-      else if (m == "codex") displayMode = MODE_CODEX;
-      else if (m == "net") displayMode = MODE_NET;
-      else if (m == "music") displayMode = MODE_MUSIC;
-      // the effectiveMode transition handler in loop() repaints the chrome
-    }
-    return;
+  if (type == USB_GET_RESOURCE && len == 1) {
+    USBResource resource = (USBResource)payload[0];
+    if (resource == USB_CLAUDE_SPRITE || resource == USB_CODEX_SPRITE) sendSpriteResource(seq, resource);
   }
 }
 
-// Drains the UART, splitting on newlines; frames start with '#', everything
-// else (line noise, echoes) is dropped.
+void resetUSBParser() {
+  usbHeaderLen = usbPayloadLen = usbExpectedLen = usbCrcLen = 0;
+}
+
+// Streaming parser resynchronizes on A5 5A, so ROM boot bytes and debug logs
+// cannot become commands. A CRC failure drops only that frame.
 void pumpSerial() {
   while (Serial.available()) {
-    char ch = (char)Serial.read();
-    if (ch == '\n' || ch == '\r') {
-      if (serialLineLen > 0 && serialLine[0] == '#') {
-        serialLine[serialLineLen] = 0;
-        handleSerialFrame(serialLine);
+    uint8_t byte = Serial.read();
+    if (usbHeaderLen < 2) {
+      if (usbHeaderLen == 0 && byte == USB_MAGIC_0) usbHeader[usbHeaderLen++] = byte;
+      else if (usbHeaderLen == 1 && byte == USB_MAGIC_1) usbHeader[usbHeaderLen++] = byte;
+      else usbHeaderLen = byte == USB_MAGIC_0 ? 1 : 0;
+      continue;
+    }
+    if (usbHeaderLen < 8) {
+      usbHeader[usbHeaderLen++] = byte;
+      if (usbHeaderLen == 8) {
+        usbExpectedLen = (size_t)usbHeader[6] | ((size_t)usbHeader[7] << 8);
+        if (usbHeader[2] != USB_PROTOCOL_VERSION || usbExpectedLen > USB_MAX_PAYLOAD) resetUSBParser();
       }
-      serialLineLen = 0;
-    } else if (serialLineLen < sizeof(serialLine) - 1) {
-      serialLine[serialLineLen++] = ch;
-    } else {
-      serialLineLen = 0; // oversized line: drop it
+      continue;
+    }
+    if (usbPayloadLen < usbExpectedLen) { usbPayload[usbPayloadLen++] = byte; continue; }
+    usbCrcBytes[usbCrcLen++] = byte;
+    if (usbCrcLen == 4) {
+      uint32_t expected = (uint32_t)usbCrcBytes[0] | ((uint32_t)usbCrcBytes[1] << 8)
+          | ((uint32_t)usbCrcBytes[2] << 16) | ((uint32_t)usbCrcBytes[3] << 24);
+      uint32_t actual = usbCRC32(usbHeader, usbPayload, usbExpectedLen);
+      if (expected == actual) {
+        uint16_t seq = (uint16_t)usbHeader[4] | ((uint16_t)usbHeader[5] << 8);
+        handleUSBFrame(usbHeader[3], seq, usbPayload, usbExpectedLen);
+      }
+      resetUSBParser();
     }
   }
 }
@@ -1324,8 +1578,12 @@ void handleRoot() {
   html += "<tr><td>Claude</td><td>" + htmlEscape(claudeStatus.status) + ", " +
           formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
-          formatTokens(codexStatus.tokensToday) + " tok, 5h " +
-          (codexStatus.primaryPct >= 0 ? String(codexStatus.primaryPct, 0) + "%" : "?") + "</td></tr>";
+          formatTokens(codexStatus.tokensToday) + " tok, 5h left " + pctText(remainingPct(codexStatus.primaryPct)) +
+          ", Wk left " + pctText(remainingPct(codexStatus.weeklyPct)) + "</td></tr>";
+  html += "<tr><td>Cursor</td><td>Total left " +
+          pctText(remainingPct(cursorStatus.totalPct)) + ", Auto left " +
+          pctText(remainingPct(cursorStatus.autoPct)) + ", API left " +
+          pctText(remainingPct(cursorStatus.apiPct)) + "</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
@@ -1352,24 +1610,27 @@ void handleSave() {
 const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
+  if (m == MODE_CURSOR) return "cursor";
   if (m == MODE_NET) return "net";
-  if (m == MODE_MUSIC) return "music";
+  if (m == MODE_CPU) return "cpu";
   return "auto";
 }
 
-void handleApiInfo() {
+String buildDeviceInfoJson() {
   JsonDocument doc;
   doc["ip"] = WiFi.localIP().toString();
   doc["ssid"] = WiFi.SSID();
   doc["bridge"] = bridgeHost;
   doc["mode"] = displayModeName(displayMode);           // configured mode
   doc["effective"] = displayModeName(effectiveMode());   // what's on screen now
-  doc["music_playing"] = statusMusicPlaying;
-  doc["showing"] = (currentApp == APP_CLAUDE) ? "claude" : "codex";
+  doc["showing"] = currentApp == APP_CLAUDE ? "claude"
+      : currentApp == APP_CODEX ? "codex" : currentApp == APP_CURSOR ? "cursor"
+      : accountsChecked ? "none" : "checking";
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
   doc["wired"] = wiredActive(); // true = data currently arrives over USB serial
+  doc["transport"] = wiredActive() ? "usb" : "wifi";
   doc["fw"] = FW_VERSION;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
@@ -1381,9 +1642,15 @@ void handleApiInfo() {
   x["custom_sprite"] = codexCustom;
   x["w"] = CODEX_SPRITE_W;
   x["h"] = CODEX_SPRITE_H;
+  JsonObject r = doc["cursor"].to<JsonObject>();
+  r["eligible"] = cursorStatus.eligible;
   String out;
   serializeJson(doc, out);
-  webServer.send(200, "application/json", out);
+  return out;
+}
+
+void handleApiInfo() {
+  webServer.send(200, "application/json", buildDeviceInfoJson());
 }
 
 void handleApiDisplay() {
@@ -1391,19 +1658,20 @@ void handleApiDisplay() {
   if (mode == "auto") displayMode = MODE_AUTO;
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
+  else if (mode == "cursor") displayMode = MODE_CURSOR;
   else if (mode == "net") displayMode = MODE_NET;
-  else if (mode == "music") displayMode = MODE_MUSIC;
+  else if (mode == "cpu") displayMode = MODE_CPU;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|cursor|net|cpu");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
   if (displayMode == MODE_NET) {
     netChromeDrawn = false;
     lastNetPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_MUSIC) {
-    musicChromeDrawn = false;
-    lastMusicPollMs = 0; // poll + draw on the next loop tick
+  } else if (displayMode == MODE_CPU) {
+    cpuChromeDrawn = false;
+    lastCpuPollMs = 0; // poll + draw on the next loop tick
   } else {
     updateActiveApp();
     drawActiveApp(); // unconditional: also repaints over a previous net chart
@@ -1717,23 +1985,26 @@ void handleSpriteUploadDone(ActiveApp slot) {
 }
 
 void setupWebServer() {
-  webServer.on("/", HTTP_GET, handleRoot);
-  webServer.on("/save", HTTP_POST, handleSave);
-  webServer.on("/reset-wifi", HTTP_POST, handleResetWifi);
-  webServer.on("/api/info", HTTP_GET, handleApiInfo);
-  webServer.on("/api/display", HTTP_POST, handleApiDisplay);
-  webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
-  webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
-  webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
-  webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
-  webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
-  webServer.on("/sprite/codex/raw", HTTP_GET, []() { handleSpriteRaw(APP_CODEX); });
-  webServer.on(
-      "/sprite/claude", HTTP_POST, []() { handleSpriteUploadDone(APP_CLAUDE); },
-      []() { handleSpriteUploadChunk(CLAUDE_GIF_FILE); });
-  webServer.on(
-      "/sprite/codex", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX); },
-      []() { handleSpriteUploadChunk(CODEX_GIF_FILE); });
+  if (!webServerConfigured) {
+    webServer.on("/", HTTP_GET, handleRoot);
+    webServer.on("/save", HTTP_POST, handleSave);
+    webServer.on("/reset-wifi", HTTP_POST, handleResetWifi);
+    webServer.on("/api/info", HTTP_GET, handleApiInfo);
+    webServer.on("/api/display", HTTP_POST, handleApiDisplay);
+    webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
+    webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
+    webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
+    webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
+    webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
+    webServer.on("/sprite/codex/raw", HTTP_GET, []() { handleSpriteRaw(APP_CODEX); });
+    webServer.on(
+        "/sprite/claude", HTTP_POST, []() { handleSpriteUploadDone(APP_CLAUDE); },
+        []() { handleSpriteUploadChunk(CLAUDE_GIF_FILE); });
+    webServer.on(
+        "/sprite/codex", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX); },
+        []() { handleSpriteUploadChunk(CODEX_GIF_FILE); });
+    webServerConfigured = true;
+  }
   webServer.begin();
   Serial.printf("[web] admin server listening on http://%s/\n", WiFi.localIP().toString().c_str());
 }
@@ -1741,8 +2012,8 @@ void setupWebServer() {
 // ---------- Arduino entry points ----------
 
 void setup() {
-  Serial.setRxBufferSize(2048); // a serial #STATUS frame (~600B) must survive a slow draw
-  Serial.begin(115200);
+  Serial.setRxBufferSize(4096);
+  Serial.begin(460800);
   LittleFS.begin();
   loadBridgeHost();
   loadBrightness();
@@ -1754,58 +2025,38 @@ void setup() {
   analogWriteFreq(BRIGHTNESS_PWM_FREQ);
   analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
   applyBrightness();
-
-  setupWiFi();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    setupWebServer();
-    webServerStarted = true;
-
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString("WiFi connected", 8, 70, 2);
-    tft.drawString("Admin page:", 8, 100, 2);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
-    delay(3000);
-
-    showMainUiIfNeeded();
-    pollBridge();
-  }
-  // else: the config-portal screen stays up; either the user configures WiFi
-  // (handled in loop) or serial #STATUS frames arrive and take the screen over
+  WiFi.mode(WIFI_OFF);
+  bootMs = millis();
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Waiting for USB...", 8, 85, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("USB is the default link", 8, 115, 2);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("WiFi fallback in 5s", 8, 145, 2);
+  tft.drawString("Firmware v" FW_VERSION, 8, 215, 2);
 }
 
 void loop() {
-  wifiManager.process(); // keeps the config portal alive until WiFi is set up
-  pumpSerial();          // wired (USB) bridge frames
-
-  if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
-    // WiFi came up after boot (portal or slow AP); the portal has released
-    // port 80 by now, so the admin server can bind it
-    setupWebServer();
-    webServerStarted = true;
-    showMainUiIfNeeded();
-    lastPollMs = 0; // poll the bridge right away
-  }
+  pumpSerial();
+  serviceWiFiFallback();
   if (webServerStarted) webServer.handleClient();
-  if (!mainUiShown) return; // config-portal screen is up, nothing to animate
+  if (!mainUiShown) return;
 
   unsigned long nowMs = millis();
 
-  // Effective mode may differ from the configured one (AUTO -> music while
-  // audio plays). On a transition, reset the incoming mode's chrome so it
-  // repaints cleanly, and repaint the pet immediately when returning to it.
+  // On a transition, reset the incoming mode's chrome so it repaints cleanly,
+  // and repaint the pet immediately when returning to it.
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
     if (eff == MODE_NET) {
       netChromeDrawn = false;
       lastNetPollMs = 0;
-    } else if (eff == MODE_MUSIC) {
-      musicChromeDrawn = false;
-      lastMusicPollMs = 0;
+    } else if (eff == MODE_CPU) {
+      cpuChromeDrawn = false;
+      lastCpuPollMs = 0;
+      drawCPUScreen();
     } else {
       updateActiveApp();
       drawActiveApp();
@@ -1821,13 +2072,12 @@ void loop() {
     }
     if (nowMs - lastNetPollMs >= NET_POLL_INTERVAL_MS) {
       lastNetPollMs = nowMs;
-      pollNet();
+      if (!wiredActive()) pollNet();
     }
-  } else if (eff == MODE_MUSIC) {
-    // music now-playing mode: cover art + track metadata from the bridge
-    if (nowMs - lastMusicPollMs >= MUSIC_POLL_INTERVAL_MS) {
-      lastMusicPollMs = nowMs;
-      pollMusic();
+  } else if (eff == MODE_CPU) {
+    if (nowMs - lastCpuPollMs >= CPU_POLL_INTERVAL_MS) {
+      lastCpuPollMs = nowMs;
+      if (!wiredActive()) pollCPU();
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)

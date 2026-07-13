@@ -16,6 +16,8 @@ struct ClaudeStatus {
     var sevenDayPct: Double? = nil
     var sevenDayResetMin: Int? = nil
     var needsInput: Bool = false // waiting on a permission/approval prompt
+    var eligible = false
+    var stale = false
 }
 
 struct CodexStatus {
@@ -28,13 +30,25 @@ struct CodexStatus {
     var weeklyWindowMin: Int? = nil
     var weeklyResetMin: Int? = nil
     var needsInput: Bool = false
+    var eligible = false
+    var stale = false
+}
+
+struct CursorStatus {
+    var totalPct: Double?
+    var autoPct: Double?
+    var apiPct: Double?
+    var billingResetMin: Int?
+    var eligible = false
+    var stale = false
 }
 
 struct Snapshot {
     var claude: ClaudeStatus
     var codex: CodexStatus
+    var cursor: CursorStatus
     var ts: Int
-    var musicPlaying: Bool = false
+    var accountsChecked = false
 }
 
 /// Reads the logs and derives status, with a small time cache so back-to-back
@@ -46,10 +60,6 @@ final class StatusService {
     /// Real OAuth quota (5h/weekly windows) merged into snapshots when set;
     /// log-derived values remain the fallback for offline use.
     var usage: UsageFetcher?
-
-    /// Whether audio is playing right now (drives the device's AUTO -> music
-    /// auto-switch). Set from NowPlayingMonitor in main.
-    var musicPlayingProvider: (() -> Bool)?
 
     // Hook-pushed live state (POST /event from Claude Code / Codex hooks).
     // Events beat the mtime heuristic while fresh: "working" for up to 10min
@@ -165,7 +175,7 @@ final class StatusService {
         if let c = cached, now - cachedAt < cacheTTL {
             snap = c
         } else {
-            snap = Snapshot(claude: readClaude(), codex: readCodex(), ts: Int(now))
+            snap = Snapshot(claude: readClaude(), codex: readCodex(), cursor: CursorStatus(), ts: Int(now))
             cached = snap
             cachedAt = now
         }
@@ -179,21 +189,34 @@ final class StatusService {
             snap.claude.fiveHourResetMin = claudeUsage.primaryResetMin
             snap.claude.sevenDayPct = claudeUsage.weeklyPct
             snap.claude.sevenDayResetMin = claudeUsage.weeklyResetMin
+            snap.claude.eligible = claudeUsage.isEligible()
+            snap.claude.stale = claudeUsage.isStale()
             let codexUsage = u.codex
-            if let pct = codexUsage.primaryPct {
-                snap.codex.primaryPct = pct
+            if codexUsage.fetchedAt != nil {
+                // A successful API response is authoritative, including an
+                // absent short window (for example Codex Pro Lite's weekly-only plan).
+                snap.codex.primaryPct = codexUsage.primaryPct
+                snap.codex.primaryWindowMin = codexUsage.primaryWindowMin
                 snap.codex.primaryResetMin = codexUsage.primaryResetMin
-            }
-            if let pct = codexUsage.weeklyPct {
-                snap.codex.weeklyPct = pct
+                snap.codex.weeklyPct = codexUsage.weeklyPct
+                snap.codex.weeklyWindowMin = codexUsage.weeklyWindowMin
                 snap.codex.weeklyResetMin = codexUsage.weeklyResetMin
             }
+            snap.codex.eligible = codexUsage.isEligible()
+            snap.codex.stale = codexUsage.isStale()
+            let cursorUsage = u.cursor
+            snap.cursor.totalPct = cursorUsage.totalPct
+            snap.cursor.autoPct = cursorUsage.autoPct
+            snap.cursor.apiPct = cursorUsage.apiPct
+            snap.cursor.billingResetMin = cursorUsage.billingResetMin
+            snap.cursor.eligible = cursorUsage.isEligible()
+            snap.cursor.stale = cursorUsage.isStale()
+            snap.accountsChecked = u.initialChecksCompleted
         }
         snap.claude.status = overrideStatus(snap.claude.status, with: claudeEvent, now: now)
         snap.codex.status = overrideStatus(snap.codex.status, with: codexEvent, now: now)
         snap.claude.needsInput = needsInput(claudeNeedsInputAt, now: now)
         snap.codex.needsInput = needsInput(codexNeedsInputAt, now: now)
-        snap.musicPlaying = musicPlayingProvider?() ?? false
         return snap
     }
 
@@ -323,17 +346,18 @@ final class StatusService {
         s.tokensToday = tokensToday
         s.status = statusFromDelta(lastMtime > 0 ? now - lastMtime : 1e9)
         if let rl = latestRateLimits {
-            let primary = rl["primary"] as? [String: Any]
-            let secondary = rl["secondary"] as? [String: Any]
-            s.primaryPct = (primary?["used_percent"] as? NSNumber)?.doubleValue
-            s.primaryWindowMin = (primary?["window_minutes"] as? NSNumber)?.intValue
-            if let reset = (primary?["resets_at"] as? NSNumber)?.doubleValue {
-                s.primaryResetMin = max(0, Int((reset - now) / 60))
-            }
-            s.weeklyPct = (secondary?["used_percent"] as? NSNumber)?.doubleValue
-            s.weeklyWindowMin = (secondary?["window_minutes"] as? NSNumber)?.intValue
-            if let reset = (secondary?["resets_at"] as? NSNumber)?.doubleValue {
-                s.weeklyResetMin = max(0, Int((reset - now) / 60))
+            for (key, fallbackWeekly) in [("primary", false), ("secondary", true)] {
+                guard let object = rl[key] as? [String: Any] else { continue }
+                let window = CodexQuotaWindow(object, now: now)
+                if window.isWeekly(fallback: fallbackWeekly) {
+                    s.weeklyPct = window.usedPct
+                    s.weeklyWindowMin = window.windowMin
+                    s.weeklyResetMin = window.resetMin
+                } else {
+                    s.primaryPct = window.usedPct
+                    s.primaryWindowMin = window.windowMin
+                    s.primaryResetMin = window.resetMin
+                }
             }
         }
         return s
@@ -347,7 +371,7 @@ extension Snapshot {
         func num(_ v: Double?) -> Any { v.map { $0 as Any } ?? NSNull() }
         let dict: [String: Any] = [
             "ts": ts,
-            "music_playing": musicPlaying,
+            "accounts_checked": accountsChecked,
             "claude": [
                 "status": claude.status,
                 "tokens_today": claude.tokensToday,
@@ -358,6 +382,8 @@ extension Snapshot {
                 "seven_day_pct": num(claude.sevenDayPct),
                 "seven_day_reset_min": num(claude.sevenDayResetMin),
                 "needs_input": claude.needsInput,
+                "eligible": claude.eligible,
+                "stale": claude.stale,
             ],
             "codex": [
                 "status": codex.status,
@@ -369,8 +395,20 @@ extension Snapshot {
                 "weekly_window_min": num(codex.weeklyWindowMin),
                 "weekly_reset_min": num(codex.weeklyResetMin),
                 "needs_input": codex.needsInput,
+                "eligible": codex.eligible,
+                "stale": codex.stale,
+            ],
+            "cursor": [
+                "status": "idle",
+                "total_pct": num(cursor.totalPct),
+                "auto_pct": num(cursor.autoPct),
+                "api_pct": num(cursor.apiPct),
+                "billing_reset_min": num(cursor.billingResetMin),
+                "eligible": cursor.eligible,
+                "stale": cursor.stale,
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data("{}".utf8)
     }
+
 }

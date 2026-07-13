@@ -14,7 +14,9 @@ sealed class MiniHttpServer
     readonly Dictionary<string, Func<byte[]>> _routes;
     readonly Dictionary<string, Func<byte[]>> _binaryRoutes;
     readonly Dictionary<string, Func<byte[], byte[]>> _postRoutes;
+    readonly object _listenerLock = new();
     TcpListener _listener;
+    bool _starting;
 
     /// Called with (path, remoteIP) for every request. The ESP8266 polls
     /// /status constantly, so this is how the app learns the device's LAN
@@ -34,9 +36,38 @@ sealed class MiniHttpServer
 
     public void Start()
     {
-        _listener = new TcpListener(IPAddress.Any, _port);
-        _listener.Start();
-        Task.Run(AcceptLoop);
+        lock (_listenerLock)
+        {
+            if (_listener != null || _starting) return;
+            _starting = true;
+        }
+        _ = Task.Run(StartWithRetries);
+    }
+
+    async Task StartWithRetries()
+    {
+        for (var attempt = 0; attempt <= 20; attempt++)
+        {
+            try
+            {
+                var listener = new TcpListener(IPAddress.Any, _port);
+                listener.Start();
+                lock (_listenerLock)
+                {
+                    _listener = listener;
+                    _starting = false;
+                }
+                Console.Error.WriteLine($"[bridge] HTTP ready on 0.0.0.0:{_port}");
+                _ = Task.Run(AcceptLoop);
+                return;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine($"[bridge] HTTP bind attempt {attempt + 1} failed: {error.Message}");
+                if (attempt < 20) await Task.Delay(1000);
+            }
+        }
+        lock (_listenerLock) _starting = false;
     }
 
     async Task AcceptLoop()
@@ -50,7 +81,9 @@ sealed class MiniHttpServer
             }
             catch
             {
-                return; // listener stopped
+                lock (_listenerLock) _listener = null;
+                Start();
+                return;
             }
             _ = Task.Run(() => Handle(client));
         }

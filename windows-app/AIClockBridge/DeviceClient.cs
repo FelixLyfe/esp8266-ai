@@ -2,21 +2,21 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 
 namespace AIClockBridge;
 
-// Talks to the ESP8266 clock's own HTTP API, so everything the device's web
-// page can do (switch display, set bridge host, upload/reset pet GIFs) is
-// available straight from the tray. Device address persists in Settings.
+// One device API with USB-first routing. HTTP remains a transparent Wi-Fi
+// fallback, so callers do not duplicate transport-specific behavior.
 
 class DeviceInfo
 {
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | net | music
-    public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
+    public string Mode = "auto";       // configured: auto | claude | codex | cursor | net | cpu
+    public string Effective = "auto";  // what's actually on screen
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
@@ -41,6 +41,10 @@ static class DeviceClient
     // posts, 30s sprite pull, 60s GIF upload+on-device decode), so the client
     // itself must not impose a shorter global one
     static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+
+    public static SerialLink UsbLink { get; set; }
+    public static string ConnectionDescription => UsbLink?.ConnectionDescription
+        ?? (BaseUrl == null ? "未连接" : "Wi-Fi 回退");
 
     public static string Host
     {
@@ -75,6 +79,7 @@ static class DeviceClient
     /// GET /api/info
     public static async Task<DeviceInfo> FetchInfo()
     {
+        if (UsbLink?.IsLinked == true) return DecodeInfo(await UsbLink.FetchInfo());
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         string body;
         try
@@ -86,9 +91,83 @@ static class DeviceClient
         {
             throw new DeviceException($"无法连接设备：{e.Message}");
         }
+        return DecodeInfo(Encoding.UTF8.GetBytes(body));
+    }
+
+    /// POST /api/display  mode=auto|claude|codex|cursor|net|cpu
+    public static Task SetDisplayMode(string mode) => UsbLink?.IsLinked == true
+        ? UsbLink.SendCommand(new() { ["display"] = mode })
+        : PostForm("api/display", new() { ["mode"] = mode });
+
+    /// POST /api/bridge  host=ip:port
+    public static Task SetBridgeHost(string bridgeHost) => UsbLink?.IsLinked == true
+        ? UsbLink.SendCommand(new() { ["bridge"] = bridgeHost })
+        : PostForm("api/bridge", new() { ["host"] = bridgeHost });
+
+    /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
+    public static Task SetBrightness(int level) => UsbLink?.IsLinked == true
+        ? UsbLink.SendCommand(new() { ["brightness"] = level })
+        : PostForm("api/brightness", new() { ["level"] = level.ToString() });
+
+    /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
+    /// and rescales the GIF on-board, then swaps the animation immediately.
+    public static async Task UploadGif(byte[] gif, string slot)
+    {
+        if (UsbLink?.IsLinked == true)
+        {
+            await UsbLink.UploadGif(gif, slot);
+            return;
+        }
+        var url = Resolve($"sprite/{slot}");
+        using var content = new MultipartFormDataContent($"aiclock-{Guid.NewGuid()}");
+        var filePart = new ByteArrayContent(gif);
+        filePart.Headers.ContentType = new MediaTypeHeaderValue("image/gif");
+        content.Add(filePart, "file", "pet.gif");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // on-device decode
+        HttpResponseMessage resp;
         try
         {
-            using var doc = JsonDocument.Parse(body);
+            resp = await Http.PostAsync(url, content, cts.Token);
+        }
+        catch (Exception e)
+        {
+            throw new DeviceException($"上传失败：{e.Message}");
+        }
+        using (resp) await ThrowUnlessOk(resp);
+    }
+
+    /// POST /sprite/{claude|codex}/reset — back to the compiled-in animation.
+    public static Task ResetSprite(string slot) => UsbLink?.IsLinked == true
+        ? UsbLink.SendCommand(new() { ["reset_sprite"] = slot })
+        : PostForm($"sprite/{slot}/reset", new());
+
+    /// GET /sprite/{claude|codex}/raw — the animation the device is actually
+    /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
+    public static async Task<byte[]> FetchSpriteRaw(string slot)
+    {
+        if (UsbLink?.IsLinked == true) return await UsbLink.FetchSprite(slot);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        byte[] data;
+        try
+        {
+            data = await Http.GetByteArrayAsync(Resolve($"sprite/{slot}/raw"), cts.Token);
+        }
+        catch (DeviceException) { throw; }
+        catch (Exception e)
+        {
+            throw new DeviceException($"拉取动画失败：{e.Message}");
+        }
+        if (data.Length <= 1) throw new DeviceException("设备响应解析失败");
+        return data;
+    }
+
+    // MARK: - internals
+
+    static DeviceInfo DecodeInfo(byte[] data)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(data);
             var root = doc.RootElement;
             var info = new DeviceInfo
             {
@@ -116,69 +195,11 @@ static class DeviceClient
             }
             return info;
         }
-        catch (Exception)
+        catch
         {
             throw new DeviceException("设备响应解析失败");
         }
     }
-
-    /// POST /api/display  mode=auto|claude|codex|net|music
-    public static Task SetDisplayMode(string mode) =>
-        PostForm("api/display", new() { ["mode"] = mode });
-
-    /// POST /api/bridge  host=ip:port
-    public static Task SetBridgeHost(string bridgeHost) =>
-        PostForm("api/bridge", new() { ["host"] = bridgeHost });
-
-    /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
-    public static Task SetBrightness(int level) =>
-        PostForm("api/brightness", new() { ["level"] = level.ToString() });
-
-    /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
-    /// and rescales the GIF on-board, then swaps the animation immediately.
-    public static async Task UploadGif(byte[] gif, string slot)
-    {
-        var url = Resolve($"sprite/{slot}");
-        using var content = new MultipartFormDataContent($"aiclock-{Guid.NewGuid()}");
-        var filePart = new ByteArrayContent(gif);
-        filePart.Headers.ContentType = new MediaTypeHeaderValue("image/gif");
-        content.Add(filePart, "file", "pet.gif");
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60)); // on-device decode
-        HttpResponseMessage resp;
-        try
-        {
-            resp = await Http.PostAsync(url, content, cts.Token);
-        }
-        catch (Exception e)
-        {
-            throw new DeviceException($"上传失败：{e.Message}");
-        }
-        using (resp) await ThrowUnlessOk(resp);
-    }
-
-    /// POST /sprite/{claude|codex}/reset — back to the compiled-in animation.
-    public static Task ResetSprite(string slot) => PostForm($"sprite/{slot}/reset", new());
-
-    /// GET /sprite/{claude|codex}/raw — the animation the device is actually
-    /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
-    public static async Task<byte[]> FetchSpriteRaw(string slot)
-    {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        byte[] data;
-        try
-        {
-            data = await Http.GetByteArrayAsync(Resolve($"sprite/{slot}/raw"), cts.Token);
-        }
-        catch (DeviceException) { throw; }
-        catch (Exception e)
-        {
-            throw new DeviceException($"拉取动画失败：{e.Message}");
-        }
-        if (data.Length <= 1) throw new DeviceException("设备响应解析失败");
-        return data;
-    }
-
-    // MARK: - internals
 
     static async Task PostForm(string path, Dictionary<string, string> fields)
     {
@@ -302,7 +323,7 @@ static class DeviceClient
 
     // MARK: - pairing watchdog
 
-    /// Stamped on every device poll of our /status|/net|/music (see Program.cs).
+    /// Stamped on every Wi-Fi device poll of /status|/net|/cpu (see Program.cs).
     public static DateTime DevicePollAt = DateTime.MinValue;
 
     static bool _healInFlight;
@@ -317,6 +338,7 @@ static class DeviceClient
     /// rate-limited to once per 5 minutes.
     public static async Task HealPairingIfNeeded(int port)
     {
+        if (UsbLink?.IsLinked == true) return;
         if (DateTime.UtcNow - DevicePollAt < TimeSpan.FromMinutes(3)) return; // device is polling us
         if (_healInFlight || DateTime.UtcNow - _lastHealAttempt < TimeSpan.FromMinutes(5)) return;
         _healInFlight = true;
@@ -324,6 +346,7 @@ static class DeviceClient
         try
         {
             if (await AutoPair(_ => { }) == null) return;
+            if (UsbLink?.IsLinked == true) return;
             var info = await FetchInfo();
             var myIp = LocalIPv4();
             if (myIp == null) return;

@@ -3,9 +3,8 @@ using System.Text.Json;
 
 namespace AIClockBridge;
 
-// Entry point. Runs tray-only (no main window) and starts the /status HTTP
-// server that the ESP8266 clock polls — the same endpoints and JSON shapes as
-// the Mac app, so the firmware can't tell which OS the bridge runs on.
+// Entry point. USB is the default transport; the HTTP service remains active
+// as a transparent Wi-Fi fallback and for local hook events.
 // Headless smoke test for the petdex -> GIF -> device pipeline (same code the
 // pet picker window uses): AIClockBridge --test-pet <slug> <claude|codex> <host>
 static class Program
@@ -28,22 +27,17 @@ static class Program
         service.Usage = usage;
         var netMonitor = new NetSpeedMonitor();
         netMonitor.Start();
-        var nowPlaying = new NowPlayingMonitor();
-        nowPlaying.Start();
-        service.MusicPlayingProvider = () => nowPlaying.Snapshot.Playing;
+        using var serialLink = new SerialLink(service, netMonitor);
+        DeviceClient.UsbLink = serialLink;
+        serialLink.Start();
 
         var server = new MiniHttpServer(Port,
             routes: new()
             {
                 ["/"] = () => service.Snapshot().ToJson(),
                 ["/status"] = () => service.Snapshot().ToJson(),
-                ["/net"] = () => netMonitor.ToJson(SystemStatsMonitor.Snapshot()),
-                ["/music"] = () => nowPlaying.ToJson(),
-            },
-            binaryRoutes: new()
-            {
-                ["/music/cover.raw"] = () => nowPlaying.CoverRgb565,
-                ["/music/text.raw"] = () => nowPlaying.TextRgb565,
+                ["/net"] = () => netMonitor.ToJson(NetworkNameMonitor.Shared.DeviceName()),
+                ["/cpu"] = () => SystemStatsMonitor.ToJson(),
             },
             postRoutes: new()
             {
@@ -80,7 +74,7 @@ static class Program
         // outright when no device is configured yet.
         server.OnRequest = (path, ip) =>
         {
-            if (path != "/status" && path != "/net" && path != "/music") return;
+            if (path != "/status" && path != "/net" && path != "/cpu") return;
             if (ip == "127.0.0.1" || ip == "::1" || ip.Length == 0) return;
             DeviceClient.DevicePollAt = DateTime.UtcNow;
             DeviceClient.LastSeenIp = ip;
@@ -93,19 +87,12 @@ static class Program
             _ => _ = DeviceClient.HealPairingIfNeeded(Port), null,
             TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
 
-        try
-        {
-            server.Start();
-            Console.Error.WriteLine($"[bridge] serving /status on 0.0.0.0:{Port}");
-        }
-        catch (Exception e)
-        {
-            Console.Error.WriteLine($"[bridge] failed to bind port {Port}: {e.Message}");
-        }
+        server.Start();
 
-        var context = new TrayAppContext(service, usage, netMonitor, nowPlaying, Port);
+        var context = new TrayAppContext(service, usage, netMonitor, serialLink, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
+        DeviceClient.UsbLink = null;
     }
 
     static async Task<int> TestPet(string[] args)

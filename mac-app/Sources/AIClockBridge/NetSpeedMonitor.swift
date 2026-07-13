@@ -58,24 +58,21 @@ final class NetSpeedMonitor {
     /// recent samples. `seq` is the total sample count; the device remembers
     /// the last seq it consumed and appends only the new entries, so its sweep
     /// runs at the true 4Hz cadence regardless of how often it polls.
-    func jsonData(cpu: Int? = nil, mem: Int? = nil) -> Data {
+    func jsonData(networkName: String) -> Data {
         lock.lock()
         let seq = totalSamples
         let tail = Array(samples.suffix(12))
         lock.unlock()
         let smoothed = currentSmoothed
-        var dict: [String: Any] = [
+        let dict: [String: Any] = [
             "rx_bps": Int(smoothed.rx),
             "tx_bps": Int(smoothed.tx),
+            "network_name": networkName,
             "seq": seq,
             "interval_ms": Int(Self.sampleInterval * 1000),
             "rx": tail.map { Int($0.rx) },
             "tx": tail.map { Int($0.tx) },
         ]
-        // present only when the CPU/MEM row is enabled - the device shows the
-        // row iff the fields exist
-        if let cpu = cpu { dict["cpu_pct"] = cpu }
-        if let mem = mem { dict["mem_pct"] = mem }
         return (try? JSONSerialization.data(withJSONObject: dict)) ?? Data("{}".utf8)
     }
 

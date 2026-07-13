@@ -20,6 +20,8 @@ class ClaudeStatus
     public double? SevenDayPct;
     public int? SevenDayResetMin;
     public bool NeedsInput; // waiting on a permission/approval prompt
+    public bool Eligible;
+    public bool Stale;
 }
 
 class CodexStatus
@@ -33,14 +35,27 @@ class CodexStatus
     public int? WeeklyWindowMin;
     public int? WeeklyResetMin;
     public bool NeedsInput;
+    public bool Eligible;
+    public bool Stale;
+}
+
+class CursorStatus
+{
+    public double? TotalPct;
+    public double? AutoPct;
+    public double? ApiPct;
+    public int? BillingResetMin;
+    public bool Eligible;
+    public bool Stale;
 }
 
 class StatusSnapshot
 {
     public ClaudeStatus Claude = new();
     public CodexStatus Codex = new();
+    public CursorStatus Cursor = new();
     public long Ts;
-    public bool MusicPlaying;
+    public bool AccountsChecked;
 
     /// Serializes to the exact JSON shape the firmware's parseStatusJson expects.
     public byte[] ToJson()
@@ -50,7 +65,7 @@ class StatusSnapshot
         {
             w.WriteStartObject();
             w.WriteNumber("ts", Ts);
-            w.WriteBoolean("music_playing", MusicPlaying);
+            w.WriteBoolean("accounts_checked", AccountsChecked);
             w.WriteStartObject("claude");
             w.WriteString("status", Claude.Status);
             w.WriteNumber("tokens_today", Claude.TokensToday);
@@ -61,6 +76,8 @@ class StatusSnapshot
             WriteNullable(w, "seven_day_pct", Claude.SevenDayPct);
             WriteNullable(w, "seven_day_reset_min", Claude.SevenDayResetMin);
             w.WriteBoolean("needs_input", Claude.NeedsInput);
+            w.WriteBoolean("eligible", Claude.Eligible);
+            w.WriteBoolean("stale", Claude.Stale);
             w.WriteEndObject();
             w.WriteStartObject("codex");
             w.WriteString("status", Codex.Status);
@@ -72,6 +89,17 @@ class StatusSnapshot
             WriteNullable(w, "weekly_window_min", Codex.WeeklyWindowMin);
             WriteNullable(w, "weekly_reset_min", Codex.WeeklyResetMin);
             w.WriteBoolean("needs_input", Codex.NeedsInput);
+            w.WriteBoolean("eligible", Codex.Eligible);
+            w.WriteBoolean("stale", Codex.Stale);
+            w.WriteEndObject();
+            w.WriteStartObject("cursor");
+            w.WriteString("status", "idle");
+            WriteNullable(w, "total_pct", Cursor.TotalPct);
+            WriteNullable(w, "auto_pct", Cursor.AutoPct);
+            WriteNullable(w, "api_pct", Cursor.ApiPct);
+            WriteNullable(w, "billing_reset_min", Cursor.BillingResetMin);
+            w.WriteBoolean("eligible", Cursor.Eligible);
+            w.WriteBoolean("stale", Cursor.Stale);
             w.WriteEndObject();
             w.WriteEndObject();
         }
@@ -103,8 +131,9 @@ class StatusSnapshot
         {
             Claude = (ClaudeStatus)Claude.MemberwiseCloneOf(),
             Codex = (CodexStatus)Codex.MemberwiseCloneOf(),
+            Cursor = (CursorStatus)Cursor.MemberwiseCloneOf(),
             Ts = Ts,
-            MusicPlaying = MusicPlaying,
+            AccountsChecked = AccountsChecked,
         };
     }
 }
@@ -132,10 +161,6 @@ sealed class StatusService
     /// Real OAuth quota (5h/weekly windows) merged into snapshots when set;
     /// log-derived values remain the fallback for offline use.
     public UsageFetcher Usage;
-
-    /// Whether audio is playing right now (drives the device's AUTO -> music
-    /// auto-switch). Set from NowPlayingMonitor in Program.
-    public Func<bool> MusicPlayingProvider;
 
     // Hook-pushed live state (POST /event from Claude Code / Codex hooks).
     // Events beat the mtime heuristic while fresh: "working" for up to 10min
@@ -259,23 +284,33 @@ sealed class StatusService
                 snap.Claude.FiveHourResetMin = cu.PrimaryResetMin;
                 snap.Claude.SevenDayPct = cu.WeeklyPct;
                 snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
+                snap.Claude.Eligible = cu.IsEligible();
+                snap.Claude.Stale = cu.IsStale();
                 var xu = Usage.Codex;
-                if (xu.PrimaryPct.HasValue)
+                if (xu.FetchedAt.HasValue)
                 {
                     snap.Codex.PrimaryPct = xu.PrimaryPct;
+                    snap.Codex.PrimaryWindowMin = xu.PrimaryWindowMin;
                     snap.Codex.PrimaryResetMin = xu.PrimaryResetMin;
-                }
-                if (xu.WeeklyPct.HasValue)
-                {
                     snap.Codex.WeeklyPct = xu.WeeklyPct;
+                    snap.Codex.WeeklyWindowMin = xu.WeeklyWindowMin;
                     snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
                 }
+                snap.Codex.Eligible = xu.IsEligible();
+                snap.Codex.Stale = xu.IsStale();
+                var ru = Usage.Cursor;
+                snap.Cursor.TotalPct = ru.TotalPct;
+                snap.Cursor.AutoPct = ru.AutoPct;
+                snap.Cursor.ApiPct = ru.ApiPct;
+                snap.Cursor.BillingResetMin = ru.BillingResetMin;
+                snap.Cursor.Eligible = ru.IsEligible();
+                snap.Cursor.Stale = ru.IsStale();
+                snap.AccountsChecked = Usage.InitialChecksCompleted;
             }
             snap.Claude.Status = OverrideStatus(snap.Claude.Status, _claudeEvent, now);
             snap.Codex.Status = OverrideStatus(snap.Codex.Status, _codexEvent, now);
             snap.Claude.NeedsInput = NeedsInput(_claudeNeedsInputAt, now);
             snap.Codex.NeedsInput = NeedsInput(_codexNeedsInputAt, now);
-            snap.MusicPlaying = MusicPlayingProvider?.Invoke() ?? false;
             return snap;
         }
     }

@@ -21,15 +21,15 @@
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac 小屏幕">
 </p>
 
-一块 240×240 的复古小电视，放在桌上实时显示 **Claude Code / Codex CLI 在干什么、额度还剩多少**。不需要任何 API key：数据来自本机已有的 CLI 登录凭据和会话日志，由配套的 Mac / Windows 桥接程序在局域网内提供给设备。
+一块 240×240 的复古小电视，放在桌上实时显示 **Claude Code / Codex CLI 在干什么，以及 Claude / Codex / Cursor 额度还剩多少**。不需要另填 API key：数据来自本机已有的登录凭据和会话记录。macOS 与 Windows 桥接程序都默认通过 USB 数据线直连设备，WiFi/HTTP 仅在 USB 断开后回退。
 
 ## 功能
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。方形进度环 + 大字显示 5 小时 / 周额度的真实用量；额度用满自动换成重置倒计时，等你审批时整圈边框红闪提醒。 |
-| <img src="docs/images/feature2.jpg" width="360" alt="网速监视"> | **网速实时监视**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整。 |
-| <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>Claude/Codex 显示工作状态，三家都显示额度。Cursor 只监测额度：外圈显示 Total，底部同时显示 Auto / API 剩余百分比。仅展示已登录且成功取得额度的账号。 |
+| <img src="docs/images/feature2.jpg" width="360" alt="网速监视"> | **网速实时监视**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整，并显示当前电脑连接的网络名称。 |
+| CPU | **CPU 占用率**<br>独立页面实时显示当前电脑的系统 CPU 占用率、颜色状态和进度条。 |
 | <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |
 
 ## 快速上手
@@ -44,29 +44,31 @@
 >
 > 命令行党也可以用 esptool 把 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 里的 `esp8266-ai-firmware-*.bin` 刷到 `0x0`。
 
-### 第 2 步 · 配 WiFi
-
-设备首次开机会开热点 **`AI-Clock-Setup`**：手机连上后自动弹出配网页（没弹就用浏览器打开 `192.168.4.1`），选择家里 WiFi、输入密码，完成。
-
-### 第 3 步 · 装桥接程序
+### 第 2 步 · 装桥接程序
 
 从 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 下载并打开：
 
-- **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许，并同意本地网络权限）
-- **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用
+- **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许）。保持 USB 数据线连接并启动应用，设备会自动握手，**无需配 WiFi**。
+- **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用。保持 USB 数据线连接并启动应用，设备会自动握手，**无需配 WiFi**；首次使用若看不到 COM 口，请先安装 CH340 驱动。
 
-桥接程序常驻菜单栏 / 托盘，会**自动发现并配对**同一局域网内的设备——到这里屏幕就活了。
+桥接程序常驻菜单栏/系统托盘并独占 USB 串口；右键菜单可选择「释放 USB 用于刷机」，设备重新枚举后自动恢复。设备上电先等待 USB 5 秒；USB 在线时 WiFi 保持关闭，连续 5 秒失联才启动 WiFi 回退。
+
+### 第 3 步 · 可选：配置 WiFi 回退
+
+macOS 与 Windows 日常使用都可跳过此步。拔掉 USB 或关闭桥接程序后，设备会尝试已有 WiFi；没有保存过网络时会开热点 **`AI-Clock-Setup`**。手机连接后打开 `192.168.4.1`，选择 WiFi 并输入密码。
 
 <p align="center">
   <img src="docs/images/working.jpg" width="640" alt="工作演示">
 </p>
 
-日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**是完整菜单（额度详情、屏幕切换、更换桌宠、音乐/网速页等）。
+日常使用都在托盘图标上：**左键**打开设备画面的实时镜像（底部有屏幕亮度滑条），**右键**是完整菜单（额度详情、屏幕切换、更换桌宠、CPU/网速页等）。
 
 ## 常见问题
 
-- **屏幕边框红色闪烁**：设备连不上桥接程序——确认电脑端程序在运行、和设备在同一 WiFi。
-- **额度一直显示 `-`**：本机没有登录过 Claude Code / Codex CLI，桥接程序读不到凭据。
+- **屏幕边框红色闪烁**：设备收不到桥接数据——先确认 USB 数据线、CH340 串口和桥接程序；WiFi 回退模式再检查两端是否在同一网络。
+- **看不到某个 AI 项**：该应用没有登录，或本次启动后尚未成功取得额度。Claude、Codex、Cursor 会独立每 2 分钟刷新；连续 6 小时没有成功数据会从轮播中移除。
+- **想立即重新获取额度**：右键菜单 →「手动重试额度」，可分别重试 Claude、Codex、Cursor；手动重试会跳过当前退避等待。
+- **Cursor 额度说明**：外圈是 Total 剩余量，底部是 Auto / API 剩余量。读取本机 Cursor 登录 token 并调用 Cursor 客户端当前使用的内部接口；Cursor 升级后接口可能变化，届时需要更新桥接程序。
 - **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
 
 ## 开发
