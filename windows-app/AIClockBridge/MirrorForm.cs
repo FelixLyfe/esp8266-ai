@@ -7,11 +7,10 @@ namespace AIClockBridge;
 // Live "mirror" of the ESP8266 screen, shown as a popup near the tray icon.
 // Not a video stream: the PC re-renders the same scene from the same data —
 // /api/info says which app the device is showing (and a sprite_rev that bumps
-// when animations change), /sprite/<app>/raw provides the exact frames the
-// device draws (custom upload or built-in), and the local StatusService
-// supplies the quota numbers the device gets from /status. Result: what you
-// see here is what the panel shows, including the walk cycle animating only
-// while that app is "working".
+// when animations change), /sprite/<app>/raw provides the exact Claude/Codex
+// frames, Cursor uses the same bundled RGB565 frames as firmware, and the local
+// StatusService supplies the quota numbers the device gets from /status.
+// Claude/Codex animate while working; Cursor loops its quota-only pet.
 
 // MARK: - the 240x240 replica control
 
@@ -107,11 +106,7 @@ sealed class MirrorControl : Control
         }
 
         // sprite, centered, pixel-crisp
-        if (ShowingProvider == "cursor")
-        {
-            DrawCursorMark(g, 120, 105, 92);
-        }
-        else if (Frames.Count > 0)
+        if (Frames.Count > 0)
         {
             var img = Frames[Math.Min(FrameIdx, Frames.Count - 1)];
             var state = g.Save();
@@ -122,7 +117,9 @@ sealed class MirrorControl : Control
         }
 
         // app logo, top-left inside the ring (firmware draws it at 14,18 @40px)
-        if (ShowingProvider != "cursor")
+        if (ShowingProvider == "cursor")
+            DrawCursorMark(g, 34, 38, 40);
+        else
             g.DrawImage(ShowingProvider == "claude" ? ClaudeLogo : CodexLogo,
                 new Rectangle(14, 18, 40, 40));
 
@@ -236,6 +233,10 @@ sealed class MirrorControl : Control
 
 sealed class MirrorForm : Form
 {
+    const int CursorSpriteW = 96, CursorSpriteH = 104;
+    static readonly List<Bitmap> CursorSpriteFrames = Rgb565.DecodeSpriteFrames(
+        LoadBinaryAsset("cursor-sprite.bin"), CursorSpriteW, CursorSpriteH);
+
     readonly StatusService _service;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
@@ -256,6 +257,18 @@ sealed class MirrorForm : Form
     DeviceInfo _lastInfo;
     string _fetchingSlot;
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
+
+    static byte[] LoadBinaryAsset(string name)
+    {
+        var asm = typeof(MirrorForm).Assembly;
+        var resource = asm.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith(name, StringComparison.OrdinalIgnoreCase));
+        if (resource == null) return Array.Empty<byte>();
+        using var stream = asm.GetManifestResourceStream(resource);
+        using var data = new MemoryStream();
+        stream.CopyTo(data);
+        return data.ToArray();
+    }
 
     public MirrorForm(StatusService service)
     {
@@ -476,7 +489,6 @@ sealed class MirrorForm : Form
         }
         else
         {
-            _mirror.Frames = new();
             _mirror.RingPct = UsageFetcher.RemainingPercent(snap.Cursor.TotalPct) ?? 0;
             var auto = UsageFetcher.RemainingPercent(snap.Cursor.AutoPct);
             var api = UsageFetcher.RemainingPercent(snap.Cursor.ApiPct);
@@ -493,6 +505,13 @@ sealed class MirrorForm : Form
 
     void EnsureSprite(DeviceInfo info)
     {
+        if (info.Showing == "cursor")
+        {
+            _mirror.Frames = CursorSpriteFrames;
+            _mirror.SpriteW = CursorSpriteW;
+            _mirror.SpriteH = CursorSpriteH;
+            return;
+        }
         if (info.Showing != "claude" && info.Showing != "codex")
         {
             _mirror.Frames = new();

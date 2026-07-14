@@ -4,10 +4,9 @@ import AppKit
 // icon. Not a video stream: the Mac re-renders the same scene from the same
 // data — /api/info says which app the device is showing (and a sprite_rev
 // that bumps when animations change), /sprite/<app>/raw provides the exact
-// frames the device draws (custom upload or built-in), and the local
-// StatusService supplies the quota numbers the device gets from /status.
-// Result: what you see here is what the panel shows, including the walk
-// cycle animating only while that app is "working".
+// Claude/Codex frames, Cursor uses the same bundled RGB565 frames as firmware,
+// and the local StatusService supplies the quota numbers the device gets from
+// /status. Claude/Codex animate while working; Cursor loops its quota-only pet.
 
 // MARK: - RGB565 frame decoding
 
@@ -116,9 +115,7 @@ final class MirrorView: NSView {
         if seg > 0 { NSRect(x: x0, y: 240 - m - seg, width: t, height: seg).fill() }     // left
 
         // sprite, centered, pixel-crisp
-        if showingProvider == "cursor" {
-            drawCursorMark(ctx, center: CGPoint(x: 120, y: 105), size: 92)
-        } else if !frames.isEmpty {
+        if !frames.isEmpty {
             let img = frames[min(frameIdx, frames.count - 1)]
             let rect = CGRect(x: 120 - spriteW / 2, y: 120 - spriteH / 2,
                               width: spriteW, height: spriteH)
@@ -132,9 +129,10 @@ final class MirrorView: NSView {
             ctx.restoreGState()
         }
 
-        // Claude/Codex logo, top-left inside the ring (firmware draws it at 14,18 @40px).
-        // Cursor keeps only its central mark.
-        if showingProvider != "cursor", let logo = Self.claudeLogo, let logo2 = Self.codexLogo {
+        // App logo, top-left inside the ring (firmware draws it at 14,18 @40px).
+        if showingProvider == "cursor" {
+            drawCursorMark(ctx, center: CGPoint(x: 34, y: 38), size: 40)
+        } else if let logo = Self.claudeLogo, let logo2 = Self.codexLogo {
             (showingProvider == "claude" ? logo : logo2).draw(in: NSRect(x: 14, y: 18, width: 40, height: 40))
         }
 
@@ -276,6 +274,14 @@ final class MirrorView: NSView {
 // MARK: - popover controller
 
 final class MirrorPopoverController: NSObject, NSPopoverDelegate {
+    private static let cursorSpriteW = 96
+    private static let cursorSpriteH = 104
+    private static let cursorSpriteFrames: [CGImage] = {
+        guard let url = Bundle.appResources.url(forResource: "cursor-sprite", withExtension: "bin"),
+              let data = try? Data(contentsOf: url) else { return [] }
+        return decodeSpriteFrames(data, w: cursorSpriteW, h: cursorSpriteH)
+    }()
+
     private let service: StatusService
     private let popover = NSPopover()
     private let mirror = MirrorView()
@@ -472,7 +478,6 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.needsInput = snap.codex.needsInput
             mirror.stale = snap.codex.stale
         } else {
-            mirror.frames = []
             mirror.ringPct = remainingPercent(fromUsed: snap.cursor.totalPct) ?? 0
             let auto = remainingPercent(fromUsed: snap.cursor.autoPct)
             let api = remainingPercent(fromUsed: snap.cursor.apiPct)
@@ -490,6 +495,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func ensureSprite(_ info: DeviceInfo) {
+        if info.showing == "cursor" {
+            mirror.frames = Self.cursorSpriteFrames
+            mirror.spriteW = Self.cursorSpriteW
+            mirror.spriteH = Self.cursorSpriteH
+            return
+        }
         guard info.showing == "claude" || info.showing == "codex" else {
             mirror.frames = []
             return

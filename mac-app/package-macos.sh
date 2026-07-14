@@ -72,7 +72,25 @@ for size in 16 32 128 256 512; do
   retina=$((size * 2))
   "$BIN_DIR/$APP_NAME" --render-icon "$SOURCE_ICON" "$ICONSET/icon_${size}x${size}@2x.png" "$retina"
 done
-iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/$APP_NAME.icns"
+
+# iconutil rejects otherwise valid iconsets on some recent macOS releases.
+# Build the multi-resolution TIFF first; tiff2icns produces the same standard
+# ICNS payload and remains available with the Command Line Tools.
+ICON_TIFFS=()
+for name in \
+  icon_16x16.png \
+  icon_32x32.png \
+  icon_32x32@2x.png \
+  icon_128x128.png \
+  icon_256x256.png \
+  icon_512x512.png \
+  icon_512x512@2x.png; do
+  tiff="$ICON_TMP/${name%.png}.tiff"
+  sips -s format tiff "$ICONSET/$name" --out "$tiff" >/dev/null
+  ICON_TIFFS+=("$tiff")
+done
+tiffutil -catnosizecheck "${ICON_TIFFS[@]}" -out "$ICON_TMP/$APP_NAME.tiff" >/dev/null
+tiff2icns "$ICON_TMP/$APP_NAME.tiff" "$CONTENTS/Resources/$APP_NAME.icns"
 
 codesign --force --deep --sign - --timestamp=none "$APP_PATH"
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"

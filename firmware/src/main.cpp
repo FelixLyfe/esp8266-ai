@@ -20,6 +20,7 @@
 #include "rotation_policy.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
+#include "img/cursor_sprite.h"
 #include "img/claude_logo.h"
 #include "img/codex_logo.h"
 
@@ -45,6 +46,7 @@ const char *USB_TRANSFER_FILE = "/usb.tmp";
 const int MAX_CUSTOM_FRAMES = 8;
 const size_t CLAUDE_FRAME_BYTES = (size_t)CLAUDE_SPRITE_W * CLAUDE_SPRITE_H * 2;
 const size_t CODEX_FRAME_BYTES = (size_t)CODEX_SPRITE_W * CODEX_SPRITE_H * 2;
+const size_t CURSOR_FRAME_BYTES = (size_t)CURSOR_SPRITE_W * CURSOR_SPRITE_H * 2;
 
 // We never hold a whole sprite frame in RAM. Decoding a GIF needs ~24KB of
 // heap for AnimatedGIF's own buffers, which wouldn't fit alongside a static
@@ -58,7 +60,7 @@ bool claudeCustom = false;
 int claudeCustomFrames = 0;
 bool codexCustom = false;
 int codexCustomFrames = 0;
-uint32_t spriteRev = 2026071302UL; // default asset revision; bumped again on upload/reset
+uint32_t spriteRev = 2026071401UL; // default asset revision; bumped again on upload/reset
 
 const int SCREEN_CX = 120, SCREEN_CY = 120;
 const int RING_MARGIN = 4;      // inset from screen edge
@@ -90,6 +92,7 @@ bool clockChromeDrawn = false;
 
 int claudeFrame = 0;
 int codexFrame = 0;
+int cursorFrame = 0;
 unsigned long lastAnimMs = 0;
 
 bool flashOn = true;
@@ -320,9 +323,9 @@ bool appStale(ActiveApp app) {
   return false;
 }
 
-// Working vs idle is now conveyed by the sprite animation itself (moving vs
-// still), not by ring color. The ring just stays steady green, except
-// bridge-stale which flashes red ("check it now") and overrides everything.
+// Claude/Codex working vs idle is conveyed by motion vs a still first frame;
+// Cursor is quota-only and keeps its idle pet looping. The ring stays steady
+// green, except bridge-stale which flashes red and overrides everything.
 uint16_t currentStatusColor() {
   if (bridgeStale()) return flashOn ? TFT_RED : TFT_BLACK;
   if (currentApp == APP_CURSOR && cursorStatus.totalPct >= 99.9f) return TFT_RED;
@@ -402,6 +405,11 @@ void drawClaudeSprite(int frameIdx) {
 void drawCodexSprite(int frameIdx) {
   drawSpriteFrame(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, frameIdx, CODEX_SPRITE_W, CODEX_SPRITE_H,
                   CODEX_FRAME_BYTES);
+}
+
+void drawCursorSprite(int frameIdx) {
+  drawSpriteFrame(false, nullptr, cursor_sprite_frames, frameIdx, CURSOR_SPRITE_W, CURSOR_SPRITE_H,
+                  CURSOR_FRAME_BYTES);
 }
 
 String pctText(float pct) {
@@ -624,7 +632,11 @@ void drawNoAIState(bool force = false) {
 }
 
 void drawAppLogo() {
-  if (currentApp == APP_CURSOR || currentApp == APP_NONE) return;
+  if (currentApp == APP_NONE) return;
+  if (currentApp == APP_CURSOR) {
+    drawCursorMark(LOGO_X + 20, LOGO_Y + 20, 40);
+    return;
+  }
   const uint16_t *logo = (currentApp == APP_CLAUDE) ? claude_logo_0 : codex_logo_0;
   int w = (currentApp == APP_CLAUDE) ? CLAUDE_LOGO_W : CODEX_LOGO_W;
   int h = (currentApp == APP_CLAUDE) ? CLAUDE_LOGO_H : CODEX_LOGO_H;
@@ -666,7 +678,7 @@ void drawActiveApp() {
     drawQuotaText(remainingPct(codexStatus.primaryPct), remainingPct(codexStatus.weeklyPct), true);
   } else {
     drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
-    drawCursorMark(SCREEN_CX, 105, 92);
+    drawCursorSprite(cursorFrame);
     drawQuotaTextWithLabels("AUTO LEFT", remainingPct(cursorStatus.autoPct),
                             "API LEFT", remainingPct(cursorStatus.apiPct), true);
   }
@@ -1843,6 +1855,9 @@ void loop() {
       } else if (currentApp == APP_CODEX && codexWorking) {
         codexFrame = (codexFrame + 1) % codexFrameCount();
         drawCodexSprite(codexFrame);
+      } else if (currentApp == APP_CURSOR) {
+        cursorFrame = (cursorFrame + 1) % CURSOR_SPRITE_FRAMES;
+        drawCursorSprite(cursorFrame);
       }
     }
 

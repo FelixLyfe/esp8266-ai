@@ -34,6 +34,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Assets\claude-logo.png" />
     <EmbeddedResource Include="Assets\codex-logo.png" />
+    <EmbeddedResource Include="Assets\cursor-sprite.bin" />
     <EmbeddedResource Include="Assets\happy-mac.png" />
   </ItemGroup>
 
