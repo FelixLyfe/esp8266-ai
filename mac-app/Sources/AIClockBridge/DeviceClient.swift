@@ -7,7 +7,7 @@ struct DeviceInfo {
     var ip = ""
     var ssid = ""
     var bridge = ""
-    var mode = "auto"       // configured: auto | claude | codex | cursor | net | cpu
+    var mode = "auto"       // configured: auto | claude | codex | cursor | clock
     var effective = "auto"  // what's actually on screen
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
@@ -72,7 +72,7 @@ final class DeviceClient {
         }.resume()
     }
 
-    /// POST /api/display  mode=auto|claude|codex|cursor|net|cpu
+    /// POST /api/display  mode=auto|claude|codex|cursor|clock
     static func setDisplayMode(_ mode: String, completion: @escaping (Error?) -> Void) {
         if let usb = usbLink, usb.isLinked {
             usb.sendCommand(["display": mode], completion: completion)
@@ -329,7 +329,7 @@ final class DeviceClient {
 
     // MARK: - pairing watchdog
 
-    /// Stamped on every device poll of our /status|/net|/cpu (see main.swift).
+    /// Stamped on every device poll of our /status|/clock (see main.swift).
     static var devicePollAt = Date.distantPast
 
     private static var healInFlight = false

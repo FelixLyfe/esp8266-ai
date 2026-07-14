@@ -25,9 +25,7 @@ static class Program
         var service = new StatusService();
         var usage = new UsageFetcher();
         service.Usage = usage;
-        var netMonitor = new NetSpeedMonitor();
-        netMonitor.Start();
-        using var serialLink = new SerialLink(service, netMonitor);
+        using var serialLink = new SerialLink(service);
         DeviceClient.UsbLink = serialLink;
         serialLink.Start();
 
@@ -36,12 +34,11 @@ static class Program
             {
                 ["/"] = () => service.Snapshot().ToJson(),
                 ["/status"] = () => service.Snapshot().ToJson(),
-                ["/net"] = () => netMonitor.ToJson(NetworkNameMonitor.Shared.DeviceName()),
-                ["/cpu"] = () => SystemStatsMonitor.ToJson(),
+                ["/clock"] = () => ClockSnapshot.Current().ToJson(),
             },
             postRoutes: new()
             {
-                // Claude Code / Codex hooks push lifecycle events here (README §7):
+                // Claude Code / Codex hooks push lifecycle events here (DEVELOPMENT §6):
                 // curl -d '{"agent":"claude","event":"PreToolUse"}' http://127.0.0.1:8765/event
                 ["/event"] = body =>
                 {
@@ -74,7 +71,7 @@ static class Program
         // outright when no device is configured yet.
         server.OnRequest = (path, ip) =>
         {
-            if (path != "/status" && path != "/net" && path != "/cpu") return;
+            if (path != "/status" && path != "/clock") return;
             if (ip == "127.0.0.1" || ip == "::1" || ip.Length == 0) return;
             DeviceClient.DevicePollAt = DateTime.UtcNow;
             DeviceClient.LastSeenIp = ip;
@@ -89,7 +86,7 @@ static class Program
 
         server.Start();
 
-        var context = new TrayAppContext(service, usage, netMonitor, serialLink, Port);
+        var context = new TrayAppContext(service, usage, serialLink, Port);
         usage.StartAutoRefresh();
         Application.Run(context);
         DeviceClient.UsbLink = null;

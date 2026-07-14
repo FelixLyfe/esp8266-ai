@@ -57,37 +57,7 @@ final class MirrorView: NSView {
     var showingProvider = "claude"
     var stale = false
     var deviceOK = false
-    // net-mode mirror: same scrolling area-chart model as the firmware —
-    // one column per 250ms sample, 224-column (56s) window, shared "nice"
-    // full-scale, dim-green download area + yellow upload line.
-    var netMode = false
-    var netNetworkName = "Not connected"
-    var netHeaderDL = "0B"
-    var netHeaderUL = "0B"
-    private static let netCols = 224 // NET_CHART_W
-    private var histRx = [Double](repeating: 0, count: netCols)
-    private var histTx = [Double](repeating: 0, count: netCols)
-
-    func resetNetSweep() {
-        histRx = [Double](repeating: 0, count: Self.netCols)
-        histTx = [Double](repeating: 0, count: Self.netCols)
-    }
-
-    func pushNetSample(rx: Double, tx: Double) {
-        histRx.removeFirst()
-        histRx.append(rx)
-        histTx.removeFirst()
-        histTx.append(tx)
-        needsDisplay = true
-    }
-
-    /// Firmware's adaptiveNetScale: the window peak sits at ~87% of the chart.
-    private static func adaptiveNetScale(_ maxV: Double) -> Double {
-        max(maxV * 1.15, 10240)
-    }
-
-    var cpuMode = false
-    var cpuPercent = 0
+    var clockMode = false
 
     private static let claudeLogo = Bundle.appResources.image(forResource: "claude-logo")
     private static let codexLogo = Bundle.appResources.image(forResource: "codex-logo")
@@ -106,17 +76,11 @@ final class MirrorView: NSView {
         panel.fill()
         panel.addClip()
 
-        if netMode {
-            drawNetScene(ctx)
+        if clockMode {
+            drawClockScene()
             ctx.restoreGState()
             return
         }
-        if cpuMode {
-            drawCPUScene(ctx)
-            ctx.restoreGState()
-            return
-        }
-
         if showingProvider == "none" || showingProvider == "checking" {
             let style = NSMutableParagraphStyle()
             style.alignment = .center
@@ -282,136 +246,30 @@ final class MirrorView: NSView {
         ctx.drawPath(using: .eoFill)
     }
 
-    private func drawCPUScene(_ ctx: CGContext) {
+    private func drawClockScene() {
+        let snapshot = ClockSnapshot.current()
         let center = NSMutableParagraphStyle()
         center.alignment = .center
-        let value = max(0, min(100, cpuPercent))
-        let color: NSColor = value >= 85 ? .systemRed : value >= 60 ? .systemYellow : .systemGreen
-
-        ("MAC CPU" as NSString).draw(in: NSRect(x: 0, y: 22, width: 240, height: 24), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .bold),
+        ("LOCAL TIME" as NSString).draw(in: NSRect(x: 0, y: 30, width: 240, height: 20), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
             .foregroundColor: NSColor.lightGray,
             .paragraphStyle: center,
         ])
-        ("\(value)%" as NSString).draw(in: NSRect(x: 0, y: 58, width: 240, height: 82), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 64, weight: .bold),
-            .foregroundColor: color,
+        (snapshot.time as NSString).draw(in: NSRect(x: 0, y: 70, width: 240, height: 58), withAttributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 42, weight: .bold),
+            .foregroundColor: NSColor.systemCyan,
             .paragraphStyle: center,
         ])
-        let bar = CGRect(x: 20, y: 158, width: 200, height: 18)
-        ctx.setFillColor(NSColor(white: 0.18, alpha: 1).cgColor)
-        ctx.fill(bar)
-        ctx.setFillColor(color.cgColor)
-        ctx.fill(CGRect(x: bar.minX, y: bar.minY, width: bar.width * CGFloat(value) / 100, height: bar.height))
-        ("SYSTEM LOAD" as NSString).draw(in: NSRect(x: 0, y: 190, width: 240, height: 18), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: NSColor.gray,
+        (snapshot.date as NSString).draw(in: NSRect(x: 0, y: 148, width: 240, height: 26), withAttributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 20, weight: .medium),
+            .foregroundColor: NSColor.white,
             .paragraphStyle: center,
         ])
-    }
-
-    /// Replica of the firmware's net-speed screen v2: header readouts, then
-    /// a 224x128 area chart at (8,60) — dim-green DL fill with bright top
-    /// edge, 2px yellow UL line, quarter gridlines, shared nice scale.
-    private func drawNetScene(_ ctx: CGContext) {
-        let green = NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
-        let yellow = NSColor(calibratedRed: 1, green: 0.8, blue: 0, alpha: 1)
-        let grey = NSColor(white: 0.55, alpha: 1)
-        let labelFont = NSFont.monospacedSystemFont(ofSize: 8, weight: .medium)
-
-        ("DOWN" as NSString).draw(at: NSPoint(x: 14, y: 8), withAttributes: [
-            .font: labelFont, .foregroundColor: grey,
+        (snapshot.weekday as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 22), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .semibold),
+            .foregroundColor: NSColor.systemYellow,
+            .paragraphStyle: center,
         ])
-        ("UP" as NSString).draw(at: NSPoint(x: 134, y: 8), withAttributes: [
-            .font: labelFont, .foregroundColor: grey,
-        ])
-        let valueFont = NSFont.monospacedSystemFont(ofSize: 19, weight: .semibold)
-        ((netHeaderDL + "/s") as NSString).draw(at: NSPoint(x: 12, y: 19), withAttributes: [
-            .font: valueFont, .foregroundColor: green,
-        ])
-        ((netHeaderUL + "/s") as NSString).draw(at: NSPoint(x: 132, y: 19), withAttributes: [
-            .font: valueFont, .foregroundColor: yellow,
-        ])
-
-        let cx: CGFloat = 8, cy: CGFloat = 60, cw: CGFloat = 224, ch: CGFloat = 128
-        let scale = Self.adaptiveNetScale(max(histRx.max() ?? 0, histTx.max() ?? 0))
-
-        // quarter gridlines
-        ctx.setStrokeColor(NSColor(white: 0.16, alpha: 1).cgColor)
-        ctx.setLineWidth(1)
-        for q in 1...3 {
-            let y = cy + ch * CGFloat(q) / 4
-            ctx.move(to: CGPoint(x: cx, y: y))
-            ctx.addLine(to: CGPoint(x: cx + cw, y: y))
-        }
-        ctx.strokePath()
-
-        // 3-tap smoothed points, one per column (matches the device)
-        func points(_ vals: [Double]) -> [CGPoint] {
-            (0..<Self.netCols).map { i in
-                let lo = max(0, i - 1), hi = min(Self.netCols - 1, i + 1)
-                let v = (vals[lo] + vals[i] + vals[hi]) / 3
-                let h = min(CGFloat(v / scale), 1) * (ch - 2)
-                return CGPoint(x: cx + CGFloat(i), y: cy + ch - 1 - h)
-            }
-        }
-
-        // download: filled area + bright top edge
-        let dl = points(histRx)
-        ctx.saveGState()
-        ctx.beginPath()
-        ctx.move(to: CGPoint(x: cx, y: cy + ch - 1))
-        for p in dl { ctx.addLine(to: p) }
-        ctx.addLine(to: CGPoint(x: cx + cw - 1, y: cy + ch - 1))
-        ctx.closePath()
-        ctx.setFillColor(NSColor(calibratedRed: 0, green: 0.33, blue: 0, alpha: 1).cgColor)
-        ctx.fillPath()
-        ctx.restoreGState()
-        // NOT the firmware's LINE_T: the popover is ~4x the panel's physical
-        // size, so a thin stroke here matches the device's thick one visually.
-        ctx.setStrokeColor(green.cgColor)
-        ctx.setLineWidth(3)
-        ctx.setLineJoin(.round)
-        ctx.beginPath()
-        ctx.move(to: dl[0])
-        for p in dl.dropFirst() { ctx.addLine(to: p) }
-        ctx.strokePath()
-
-        // upload: yellow line
-        let ul = points(histTx)
-        ctx.setStrokeColor(yellow.cgColor)
-        ctx.setLineWidth(3)
-        ctx.beginPath()
-        ctx.move(to: ul[0])
-        for p in ul.dropFirst() { ctx.addLine(to: p) }
-        ctx.strokePath()
-
-        // axis + footer labels
-        let style = NSMutableParagraphStyle()
-        style.alignment = .right
-        (Self.deviceSpeedText(scale) as NSString).draw(
-            in: NSRect(x: 120, y: 46, width: 112, height: 12), withAttributes: [
-                .font: labelFont, .foregroundColor: grey, .paragraphStyle: style,
-            ])
-        let center = NSMutableParagraphStyle()
-        center.alignment = .center
-        center.lineBreakMode = .byTruncatingMiddle
-        (netNetworkName as NSString).draw(
-            in: NSRect(x: 12, y: 193, width: 216, height: 18), withAttributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.white, .paragraphStyle: center,
-            ])
-        ("MAC NET  -  56s" as NSString).draw(
-            in: NSRect(x: 0, y: 219, width: 240, height: 12), withAttributes: [
-                .font: labelFont, .foregroundColor: grey, .paragraphStyle: center,
-            ])
-    }
-
-    /// Same compact unit strings the firmware prints ("2.3M", "480K").
-    static func deviceSpeedText(_ bps: Double) -> String {
-        if bps >= 1_000_000 { return String(format: "%.1fM", bps / 1_000_000) }
-        if bps >= 1_000 { return String(format: "%.0fK", bps / 1_000) }
-        return String(format: "%.0fB", bps)
     }
 }
 
@@ -419,10 +277,9 @@ final class MirrorView: NSView {
 
 final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let service: StatusService
-    private let netMonitor: NetSpeedMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "Cursor", "网速", "CPU"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "Cursor", "时钟"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -435,14 +292,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     private var pollTimer: Timer?
     private var animTimer: Timer?
-    private var sweepTimer: Timer?
     private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int)] = [:]
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor) {
+    init(service: StatusService) {
         self.service = service
-        self.netMonitor = netMonitor
         super.init()
         popover.behavior = .transient
         popover.delegate = self
@@ -528,16 +383,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         pollTimer?.invalidate()
         animTimer?.invalidate()
-        sweepTimer?.invalidate()
         pollTimer = nil
         animTimer = nil
-        sweepTimer = nil
     }
 
     private func startTimers() {
         pollTimer?.invalidate()
         animTimer?.invalidate()
-        sweepTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -545,22 +397,6 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         animTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             self?.animTick()
         }
-        // same cadence as the firmware's NET_DRAW_INTERVAL_MS sweep
-        sweepTimer = Timer.scheduledTimer(withTimeInterval: NetSpeedMonitor.sampleInterval,
-                                          repeats: true) { [weak self] _ in
-            self?.sweepTick()
-        }
-    }
-
-    /// One sweep step: push the newest 4Hz sample, refresh the DL/UL readout.
-    private func sweepTick() {
-        guard mirror.netMode, popover.isShown else { return }
-        let cur = netMonitor.current
-        let smoothed = netMonitor.currentSmoothed
-        mirror.netHeaderDL = MirrorView.deviceSpeedText(smoothed.rx)
-        mirror.netHeaderUL = MirrorView.deviceSpeedText(smoothed.tx)
-        mirror.netNetworkName = NetworkNameMonitor.shared.currentName()
-        mirror.pushNetSample(rx: cur.rx, tx: cur.tx)
     }
 
     private func tick() {
@@ -574,11 +410,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.ensureSprite(info)
                 self.syncBrightness(info)
                 let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "cursor": 3,
-                               "net": 4, "cpu": 5][info.mode] ?? 0
+                               "clock": 4][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
-                    : info.mode == "net" ? "网速曲线"
-                    : info.mode == "cpu" ? "CPU 占用率" : "固定显示"
+                    : info.mode == "clock" ? "时钟" : "固定显示"
                 self.statusLabel.stringValue = "\(DeviceClient.connectionDescription) · \(modeText)"
             case .failure:
                 self.mirror.deviceOK = false
@@ -599,16 +434,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
     private func applyScene(_ info: DeviceInfo) {
-        let enteringNet = info.effective == "net" && !mirror.netMode
-        mirror.netMode = info.effective == "net"
-        mirror.cpuMode = info.effective == "cpu"
-        if mirror.netMode {
-            if enteringNet { mirror.resetNetSweep() } // fresh sweep, like the device's chrome reset
-            mirror.needsDisplay = true
-            return
-        }
-        if mirror.cpuMode {
-            mirror.cpuPercent = SystemStatsMonitor.shared.cpuPercent()
+        mirror.clockMode = info.effective == "clock"
+        if mirror.clockMode {
             mirror.needsDisplay = true
             return
         }
@@ -698,7 +525,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var flashCounter = 0
 
     private func animTick() {
-        guard let info = lastInfo, !mirror.netMode, !mirror.cpuMode else { return }
+        guard let info = lastInfo, !mirror.clockMode else { return }
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if mirror.needsInput {
@@ -726,7 +553,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "cursor", "net", "cpu"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "claude", "codex", "cursor", "clock"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

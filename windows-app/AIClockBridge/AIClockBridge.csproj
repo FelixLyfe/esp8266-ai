@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Windows port of mac-app/: same tray-icon bridge (USB-first transport,
-       status server, screen mirror, quota, CPU/net pages, petdex picker).
+       status server, screen mirror, quota, clock page, petdex picker).
        ImageSharp is needed because
        System.Drawing cannot decode petdex's WebP spritesheets nor author
        multi-frame GIFs. EnableWindowsTargeting lets the project compile on

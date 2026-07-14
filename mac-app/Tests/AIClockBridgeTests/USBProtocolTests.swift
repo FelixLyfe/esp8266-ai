@@ -8,12 +8,12 @@ final class USBProtocolTests: XCTestCase {
     }
 
     func testFrameRoundTripAfterNoise() {
-        let original = USBFrame(type: .command, sequence: 0x1234,
-                                payload: Data("{\"brightness\":42}".utf8))
+        let original = USBFrame(type: .clock, sequence: 0x1234,
+                                payload: Data("{\"time\":\"12:34:56\",\"date\":\"2026-07-14\",\"weekday\":\"TUE\"}".utf8))
         var stream = Data([0x00, 0xFF, 0xA5, 0x00])
         stream.append(original.encoded())
         let decoded = USBFrame.decode(from: &stream)
-        XCTAssertEqual(decoded?.type, .command)
+        XCTAssertEqual(decoded?.type, .clock)
         XCTAssertEqual(decoded?.sequence, 0x1234)
         XCTAssertEqual(decoded?.payload, original.payload)
         XCTAssertTrue(stream.isEmpty)

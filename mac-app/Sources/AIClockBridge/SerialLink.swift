@@ -9,7 +9,6 @@ final class SerialLink {
     private static let preferredPortKey = "usb_preferred_port"
 
     private let service: StatusService
-    private let netMonitor: NetSpeedMonitor
 
     private(set) var portPath = ""
     private(set) var isLinked = false
@@ -21,8 +20,7 @@ final class SerialLink {
     private var lastHeartbeatAt = Date.distantPast
     private var lastDeviceFrameAt = Date.distantPast
     private var lastStatusAt = Date.distantPast
-    private var lastNetAt = Date.distantPast
-    private var lastCPUAt = Date.distantPast
+    private var lastClockAt = Date.distantPast
     private var legacyProbe = false
     private var rxBuffer = Data()
     private var txBuffer = Data()
@@ -46,9 +44,8 @@ final class SerialLink {
     private var releasedPort = ""
     private var releasedPortDisappeared = false
 
-    init(service: StatusService, netMonitor: NetSpeedMonitor) {
+    init(service: StatusService) {
         self.service = service
-        self.netMonitor = netMonitor
     }
 
     func start() {
@@ -195,15 +192,10 @@ final class SerialLink {
             lastStatusAt = now
             enqueue(USBFrame(type: .status, sequence: takeSequence(), payload: service.snapshot().jsonData()))
         }
-        if now.timeIntervalSince(lastNetAt) >= 2 {
-            lastNetAt = now
-            enqueue(USBFrame(type: .net, sequence: takeSequence(),
-                             payload: netMonitor.jsonData(networkName: NetworkNameMonitor.shared.deviceName())))
-        }
-        if now.timeIntervalSince(lastCPUAt) >= 1 {
-            lastCPUAt = now
-            enqueue(USBFrame(type: .cpu, sequence: takeSequence(),
-                             payload: SystemStatsMonitor.shared.jsonData()))
+        if now.timeIntervalSince(lastClockAt) >= 1 {
+            lastClockAt = now
+            enqueue(USBFrame(type: .clock, sequence: takeSequence(),
+                             payload: ClockSnapshot.current().jsonData()))
         }
     }
 
@@ -416,8 +408,7 @@ final class SerialLink {
             if !isLinked {
                 isLinked = true
                 lastStatusAt = .distantPast
-                lastNetAt = .distantPast
-                lastCPUAt = .distantPast
+                lastClockAt = .distantPast
                 FileHandle.standardError.write(Data("[usb] linked \(portPath)\n".utf8))
                 notifyChange()
             }

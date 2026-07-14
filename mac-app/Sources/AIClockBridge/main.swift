@@ -107,20 +107,17 @@ let port: UInt16 = 8765
 let service = StatusService()
 let usage = UsageFetcher()
 service.usage = usage
-let netMonitor = NetSpeedMonitor()
-netMonitor.start()
 
 // USB is the default device transport. HTTP stays available only for the
 // firmware's automatic Wi-Fi fallback after the cable/link disappears.
-let serialLink = SerialLink(service: service, netMonitor: netMonitor)
+let serialLink = SerialLink(service: service)
 DeviceClient.usbLink = serialLink
 serialLink.start()
 
 let server = HTTPServer(port: port, routes: [
     "/": { service.snapshot().jsonData() },
     "/status": { service.snapshot().jsonData() },
-    "/net": { netMonitor.jsonData(networkName: NetworkNameMonitor.shared.deviceName()) },
-    "/cpu": { SystemStatsMonitor.shared.jsonData() },
+    "/clock": { ClockSnapshot.current().jsonData() },
 ], postRoutes: [
     // Claude Code / Codex hooks use the normalized shape.
     // curl -d '{"agent":"claude","event":"PreToolUse"}' http://127.0.0.1:8765/event
@@ -138,7 +135,7 @@ let server = HTTPServer(port: port, routes: [
 // Remember it (for auto-pairing / DHCP-change self-healing) and adopt it
 // outright when no device is configured yet.
 server.onRequest = { path, ip in
-    guard path == "/status" || path == "/net" || path == "/cpu",
+    guard path == "/status" || path == "/clock",
           ip != "127.0.0.1", ip != "::1", !ip.isEmpty else { return }
     DeviceClient.devicePollAt = Date()
     DeviceClient.lastSeenIP = ip
@@ -160,8 +157,7 @@ do {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let menuBar = MenuBarController(service: service, usage: usage, netMonitor: netMonitor,
-                                serialLink: serialLink, port: port)
+let menuBar = MenuBarController(service: service, usage: usage, serialLink: serialLink, port: port)
 _ = menuBar // retain
 usage.startAutoRefresh()
 app.run()

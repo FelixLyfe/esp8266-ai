@@ -15,7 +15,7 @@ class DeviceInfo
     public string Ip = "";
     public string Ssid = "";
     public string Bridge = "";
-    public string Mode = "auto";       // configured: auto | claude | codex | cursor | net | cpu
+    public string Mode = "auto";       // configured: auto | claude | codex | cursor | clock
     public string Effective = "auto";  // what's actually on screen
     public string Showing = "";
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
@@ -94,7 +94,7 @@ static class DeviceClient
         return DecodeInfo(Encoding.UTF8.GetBytes(body));
     }
 
-    /// POST /api/display  mode=auto|claude|codex|cursor|net|cpu
+    /// POST /api/display  mode=auto|claude|codex|cursor|clock
     public static Task SetDisplayMode(string mode) => UsbLink?.IsLinked == true
         ? UsbLink.SendCommand(new() { ["display"] = mode })
         : PostForm("api/display", new() { ["mode"] = mode });
@@ -323,7 +323,7 @@ static class DeviceClient
 
     // MARK: - pairing watchdog
 
-    /// Stamped on every Wi-Fi device poll of /status|/net|/cpu (see Program.cs).
+    /// Stamped on every Wi-Fi device poll of /status|/clock (see Program.cs).
     public static DateTime DevicePollAt = DateTime.MinValue;
 
     static bool _healInFlight;

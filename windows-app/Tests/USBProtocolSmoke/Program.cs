@@ -9,7 +9,8 @@ static void Require(bool condition, string message)
 Require(USBFrame.Crc32(Encoding.ASCII.GetBytes("123456789")) == 0xCBF4_3926,
     "CRC32 reference vector failed");
 
-var original = new USBFrame(USBMessage.Command, 0x1234, Encoding.UTF8.GetBytes("{\"display\":\"cpu\"}"));
+var original = new USBFrame(USBMessage.Clock, 0x1234,
+    Encoding.UTF8.GetBytes("{\"time\":\"12:34:56\",\"date\":\"2026-07-14\",\"weekday\":\"TUE\"}"));
 var noisy = new List<byte> { 0x00, 0xFF, 0xA5 };
 noisy.AddRange(original.Encode());
 Require(USBFrame.TryDecode(noisy, out var decoded), "frame did not decode");

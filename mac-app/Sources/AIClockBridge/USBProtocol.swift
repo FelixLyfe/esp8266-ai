@@ -6,8 +6,7 @@ enum USBMessage: UInt8 {
     case heartbeat = 0x03
     case heartbeatAck = 0x04
     case status = 0x10
-    case net = 0x11
-    case cpu = 0x12
+    case clock = 0x13
     case getInfo = 0x20
     case deviceInfo = 0x21
     case command = 0x22

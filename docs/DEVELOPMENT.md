@@ -44,7 +44,7 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   重绘同一个画面（方形额度环 + 当前桌宠动画 + logo + 额度文字），动画帧直接从设备
   通过 USB 资源帧读取（WiFi 回退时使用 `GET /sprite/<app>/raw`；设备正在用什么就播什么），
   working 时同步播放走路循环，随设备 2s/6s 切换同步换角色；底部附
-  自动/Claude/Codex/Cursor/网速/CPU 快速切换。
+  自动/Claude/Codex/Cursor/时钟快速切换。
 - **右键点击** → 控制菜单：完整额度（5h/周 剩余量 + 重置倒计时）+ 设备遥控：
 
 - **USB 已连接 / WiFi 回退 / 未连接**：正常流程只显示当前传输状态；设备 IP 和配对操作收进「高级 · WiFi 回退」。
@@ -55,9 +55,8 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备 IP…**：手动填写 WiFi 回退地址
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 固定 Cursor / 网速曲线 / CPU 占用率；未登录项禁用并标注“未登录”
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 固定 Cursor / 时钟；未登录项禁用并标注“未登录”
 - **手动重试额度**：Claude、Codex、Cursor 可分别立即重试；绕过该 provider 的 60 秒/429 退避，但同一家已有请求运行时不会重复并发。
-- **CPU 占用率**：独立页面实时显示当前 macOS/Windows 主机的系统 CPU 占用率
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
 - **恢复默认动画**：删掉自定义 GIF，回到固件内置形象
@@ -200,7 +199,7 @@ pio device monitor -b 460800
 - 控制/状态消息使用单行 JSON 负载；GIF 和镜像精灵使用 `RESOURCE_BEGIN / RESOURCE_CHUNK / RESOURCE_END` 二进制分块。
 - 每个主机到设备的控制/资源块都等待 ACK，超时最多重试两次；设备按 offset 接受重复块，避免“已写入但 ACK 丢失”破坏传输。
 - `HELLO/HELLO_ACK` 建链，之后每秒 `HEARTBEAT`；固件 5 秒未收到有效帧即认为 USB 断开。
-- 主要消息类型：状态 `STATUS`、网速 `NET`、CPU `CPU`、设备信息 `GET_INFO/DEVICE_INFO`、控制 `COMMAND`、资源读取 `GET_RESOURCE`。
+- 主要消息类型：状态 `STATUS`、时钟 `CLOCK`、设备信息 `GET_INFO/DEVICE_INFO`、控制 `COMMAND`、资源读取 `GET_RESOURCE`。
 - USB 物理连接即可信，不做密钥或加密；CRC 只负责传输检错。
 
 ### 设备 HTTP API（仅作 WiFi 回退）
@@ -208,7 +207,7 @@ pio device monitor -b 460800
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
-| POST | `/api/display` | `mode=auto\|claude\|codex\|cursor\|net\|cpu` 切换屏幕显示（net=网速曲线页，cpu=CPU 占用率页）|
+| POST | `/api/display` | `mode=auto\|claude\|codex\|cursor\|clock` 切换屏幕显示（clock=时钟页）|
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
@@ -216,37 +215,20 @@ pio device monitor -b 460800
 
 `/api/info` 里的 `sprite_rev` 在每次上传/重置动画后自增，镜像端据此决定是否重新拉帧。
 
-## 5. 网速曲线页（桌面端 + 设备同步显示）
+## 5. 时钟页（桌面端 + 设备同步显示）
 
-桌面 app 每 250ms（4Hz）读一次系统的网卡字节计数：macOS 使用
-getifaddrs/AF_LINK，只统计物理 `en*`；Windows 使用 `NetworkInterface`，只统计活动的
-物理 Ethernet/Wi-Fi 并排除常见 VPN/虚拟网卡。两端都保留 3 分钟历史。
+显示模式切到「时钟」后，macOS / Windows 使用电脑本地时区生成 `HH:mm:ss`、
+`YYYY-MM-DD` 和英文星期缩写。USB 模式每秒推送一个独立的 `CLOCK` 帧（消息类型 `0x13`）；
+WiFi 回退模式由设备每秒请求 `GET /clock`。不依赖设备 NTP，也不采集 SSID 或网卡流量。
 
-显示模式切到「网速曲线」后，设备端**渲染与网络完全解耦**：`GET /net` 返回带全局
-序号（seq）的最近 12 个 250ms 样本。USB 模式由桌面 app 每 2 秒推送 `NET` 帧，WiFi 回退才由设备 `GET /net`；两条链路进入同一个队列并按 seq 去重，渲染以固定 250ms/列的节奏消费。
-
-界面是任务管理器风格的**滚动填充面积图**（224 列 x 128px，56 秒窗口，最新在右）：
-下载 = 暗绿填充 + 亮绿顶边，上传 = 2px 黄线，背景 25/50/75% 暗格线；整图共享一个
-1/2/5 阶梯的"整数量程"（10K/20K/50K/…），高度全图可比，量程标签显示在图外右上。
-每帧从 224 个样本的数据环逐行合成像素、每行一次 `pushImage` 整行写屏——没有
-"先清屏再画"的过程，所以完全无闪烁。顶部大号 DL/UL 读数取 1 秒平均，只在数值
-变化时局部重绘。底部显示当前活动 Wi-Fi 的 SSID；取不到 SSID 时显示活动以太网接口。
-设备内置字体只支持 ASCII，因此非拉丁 SSID 在发往设备前会转成可显示文本；桌面镜像仍显示系统返回的原始名称。
-macOS / Windows 镜像用同一套数据模型和布局同步渲染。
+设备和桌面镜像使用同一布局：顶部 `LOCAL TIME`，中间大号时间，底部依次显示日期和星期。
+固件只局部重绘发生变化的文本区域，避免每秒整屏闪烁。
 
 若自行配置 LaunchAgent，目标应指向 `dist/AIClockBridge.app/Contents/MacOS/AIClockBridge`。
 改代码后重新运行 `mac-app/package-macos.sh`，再替换已安装的 App，避免旧进程和新版本
 同时抢占 8765 端口或 USB 串口。
 
-## 6. CPU 占用率页（桌面端 + 设备同步显示）
-
-显示模式切到「CPU 占用率」（弹窗底部分段控件 / 右键菜单 / `POST /api/display mode=cpu`）
-后，桌面 app 每秒采样一次系统 CPU tick 差值。USB 模式使用 `CPU` 帧推送 `cpu_pct`；WiFi
-回退使用 `GET /cpu`。设备与 macOS / Windows 镜像都显示大号百分比和进度条，低于 60% 为绿色、
-60% 到 84% 为黄色、85% 及以上为红色。该页面只在用户明确选择时显示，不改变 AUTO
-模式的 AI provider 轮播。
-
-## 7. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
+## 6. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
 
 除了日志 mtime 轮询（保留为兜底），bridge 还接收 Claude/Codex hooks 的事件推送，
 状态切换从"最多迟滞 20 秒"变成"毫秒级"：

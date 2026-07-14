@@ -29,19 +29,7 @@ sealed class MirrorControl : Control
     public string ShowingProvider = "claude";
     public bool Stale;
     public bool DeviceOK;
-    // net-mode mirror: same scrolling area-chart model as the firmware —
-    // one column per 250ms sample, 224-column (56s) window, shared "nice"
-    // full-scale, dim-green download area + yellow upload line.
-    public bool NetMode;
-    public string NetNetworkName = "Not connected";
-    public string NetHeaderDL = "0B";
-    public string NetHeaderUL = "0B";
-    const int NetCols = 224; // NET_CHART_W
-    double[] _histRx = new double[NetCols];
-    double[] _histTx = new double[NetCols];
-
-    public bool CpuMode;
-    public int CpuPercent;
+    public bool ClockMode;
 
     static readonly Image ClaudeLogo = LoadAsset("claude-logo.png");
     static readonly Image CodexLogo = LoadAsset("codex-logo.png");
@@ -66,24 +54,6 @@ sealed class MirrorControl : Control
         return Image.FromStream(stream);
     }
 
-    public void ResetNetSweep()
-    {
-        _histRx = new double[NetCols];
-        _histTx = new double[NetCols];
-    }
-
-    public void PushNetSample(double rx, double tx)
-    {
-        Array.Copy(_histRx, 1, _histRx, 0, NetCols - 1);
-        _histRx[NetCols - 1] = rx;
-        Array.Copy(_histTx, 1, _histTx, 0, NetCols - 1);
-        _histTx[NetCols - 1] = tx;
-        Invalidate();
-    }
-
-    /// Firmware's adaptiveNetScale: the window peak sits at ~87% of the chart.
-    static double AdaptiveNetScale(double maxV) => Math.Max(maxV * 1.15, 10240);
-
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -99,17 +69,11 @@ sealed class MirrorControl : Control
             g.SetClip(panel);
         }
 
-        if (NetMode)
+        if (ClockMode)
         {
-            DrawNetScene(g);
+            DrawClockScene(g);
             return;
         }
-        if (CpuMode)
-        {
-            DrawCpuScene(g);
-            return;
-        }
-
         if (ShowingProvider is "none" or "checking")
         {
             using var font = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -239,124 +203,20 @@ sealed class MirrorControl : Control
         g.FillPath(Brushes.White, path);
     }
 
-    void DrawCpuScene(Graphics g)
+    void DrawClockScene(Graphics g)
     {
-        var value = Math.Clamp(CpuPercent, 0, 100);
-        var color = value >= 85 ? Color.Red : value >= 60 ? Yellow : Green;
+        var snapshot = ClockSnapshot.Current();
         using var center = new StringFormat { Alignment = StringAlignment.Center };
-        using (var title = new Font("Consolas", 15, FontStyle.Bold, GraphicsUnit.Pixel))
-            g.DrawString("WINDOWS CPU", title, Brushes.LightGray, new RectangleF(0, 22, 240, 24), center);
-        using (var number = new Font("Consolas", 64, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var brush = new SolidBrush(color))
-            g.DrawString($"{value}%", number, brush, new RectangleF(0, 58, 240, 82), center);
-        using var barBackground = new SolidBrush(Color.FromArgb(46, 46, 46));
-        using var barFill = new SolidBrush(color);
-        g.FillRectangle(barBackground, 20, 158, 200, 18);
-        g.FillRectangle(barFill, 20, 158, 200 * value / 100f, 18);
-        using var footer = new Font("Consolas", 10, FontStyle.Regular, GraphicsUnit.Pixel);
-        g.DrawString("SYSTEM LOAD", footer, Brushes.Gray, new RectangleF(0, 190, 240, 18), center);
-    }
-
-    /// Replica of the firmware's net-speed screen v2: header readouts, then
-    /// a 224x128 area chart at (8,60) — dim-green DL fill with bright top
-    /// edge, 2px yellow UL line, quarter gridlines, shared nice scale.
-    void DrawNetScene(Graphics g)
-    {
-        var grey = Color.FromArgb(140, 140, 140);
-        using var greyBrush = new SolidBrush(grey);
-        using var labelFont = new Font("Consolas", 8, FontStyle.Regular, GraphicsUnit.Pixel);
-
-        g.DrawString("DOWN", labelFont, greyBrush, 14, 8);
-        g.DrawString("UP", labelFont, greyBrush, 134, 8);
-        using (var valueFont = new Font("Consolas", 19, FontStyle.Bold, GraphicsUnit.Pixel))
-        using (var greenBrush = new SolidBrush(Green))
-        using (var yellowBrush = new SolidBrush(Yellow))
-        {
-            g.DrawString(NetHeaderDL + "/s", valueFont, greenBrush, 12, 19);
-            g.DrawString(NetHeaderUL + "/s", valueFont, yellowBrush, 132, 19);
-        }
-
-        const float cx = 8, cy = 60, cw = 224, ch = 128;
-        var scale = AdaptiveNetScale(Math.Max(_histRx.Max(), _histTx.Max()));
-
-        // quarter gridlines
-        using (var grid = new Pen(Color.FromArgb(41, 41, 41), 1))
-        {
-            for (int q = 1; q <= 3; q++)
-            {
-                var y = cy + ch * q / 4;
-                g.DrawLine(grid, cx, y, cx + cw, y);
-            }
-        }
-
-        // 3-tap smoothed points, one per column (matches the device)
-        PointF[] Points(double[] vals)
-        {
-            var pts = new PointF[NetCols];
-            for (int i = 0; i < NetCols; i++)
-            {
-                var lo = Math.Max(0, i - 1);
-                var hi = Math.Min(NetCols - 1, i + 1);
-                var v = (vals[lo] + vals[i] + vals[hi]) / 3;
-                var hgt = (float)Math.Min(v / scale, 1) * (ch - 2);
-                pts[i] = new PointF(cx + i, cy + ch - 1 - hgt);
-            }
-            return pts;
-        }
-
-        // download: filled area + bright top edge
-        var dl = Points(_histRx);
-        using (var path = new GraphicsPath())
-        {
-            path.AddLine(cx, cy + ch - 1, dl[0].X, dl[0].Y);
-            path.AddLines(dl);
-            path.AddLine(dl[^1].X, dl[^1].Y, cx + cw - 1, cy + ch - 1);
-            path.CloseFigure();
-            using var fill = new SolidBrush(Color.FromArgb(0, 84, 0));
-            g.FillPath(fill, path);
-        }
-        // NOT the firmware's LINE_T: the mirror window is ~4x the panel's
-        // physical size, so a thin stroke here matches the device visually.
-        using (var pen = new Pen(Green, 3) { LineJoin = LineJoin.Round })
-        {
-            g.DrawLines(pen, dl);
-        }
-
-        // upload: yellow line
-        var ul = Points(_histTx);
-        using (var pen = new Pen(Yellow, 3) { LineJoin = LineJoin.Round })
-        {
-            g.DrawLines(pen, ul);
-        }
-
-        // axis + footer labels
-        using (var right = new StringFormat { Alignment = StringAlignment.Far })
-        {
-            g.DrawString(DeviceSpeedText(scale), labelFont, greyBrush,
-                         new RectangleF(120, 46, 112, 12), right);
-        }
-        using (var center = new StringFormat { Alignment = StringAlignment.Center })
-        {
-            using var networkFont = new Font("Consolas", 11, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var networkFormat = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                Trimming = StringTrimming.EllipsisCharacter,
-                FormatFlags = StringFormatFlags.NoWrap,
-            };
-            g.DrawString(NetNetworkName, networkFont, Brushes.White,
-                         new RectangleF(12, 193, 216, 18), networkFormat);
-            g.DrawString("WINDOWS NET  -  56s", labelFont, greyBrush,
-                         new RectangleF(0, 219, 240, 12), center);
-        }
-    }
-
-    /// Same compact unit strings the firmware prints ("2.3M", "480K").
-    public static string DeviceSpeedText(double bps)
-    {
-        if (bps >= 1_000_000) return $"{bps / 1_000_000:F1}M";
-        if (bps >= 1_000) return $"{bps / 1_000:F0}K";
-        return $"{bps:F0}B";
+        using var title = new Font("Consolas", 13, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var time = new Font("Consolas", 42, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var date = new Font("Consolas", 20, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var weekday = new Font("Consolas", 15, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var cyan = new SolidBrush(Color.Cyan);
+        using var yellow = new SolidBrush(Yellow);
+        g.DrawString("LOCAL TIME", title, Brushes.LightGray, new RectangleF(0, 30, 240, 20), center);
+        g.DrawString(snapshot.Time, time, cyan, new RectangleF(0, 70, 240, 58), center);
+        g.DrawString(snapshot.Date, date, Brushes.White, new RectangleF(0, 148, 240, 26), center);
+        g.DrawString(snapshot.Weekday, weekday, yellow, new RectangleF(0, 188, 240, 22), center);
     }
 
     static GraphicsPath RoundedRect(RectangleF r, float radius)
@@ -377,11 +237,10 @@ sealed class MirrorControl : Control
 sealed class MirrorForm : Form
 {
     readonly StatusService _service;
-    readonly NetSpeedMonitor _netMonitor;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "cursor", "net", "cpu" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "Cursor", "网速", "CPU" };
+    static readonly string[] Modes = { "auto", "claude", "codex", "cursor", "clock" };
+    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "Cursor", "时钟" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
@@ -392,20 +251,15 @@ sealed class MirrorForm : Form
 
     readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 1000 };
     readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 120 };
-    readonly System.Windows.Forms.Timer _sweepTimer = new()
-    {
-        Interval = (int)(NetSpeedMonitor.SampleInterval * 1000),
-    };
 
     readonly Dictionary<string, (int Rev, List<Bitmap> Frames, int W, int H)> _spriteCache = new();
     DeviceInfo _lastInfo;
     string _fetchingSlot;
     bool _applyingMode; // suppress CheckedChanged while reflecting device state
 
-    public MirrorForm(StatusService service, NetSpeedMonitor netMonitor)
+    public MirrorForm(StatusService service)
     {
         _service = service;
-        _netMonitor = netMonitor;
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -467,7 +321,6 @@ sealed class MirrorForm : Form
 
         _pollTimer.Tick += async (_, _) => await Tick();
         _animTimer.Tick += (_, _) => AnimTick();
-        _sweepTimer.Tick += (_, _) => SweepTick();
         Deactivate += (_, _) => HidePopup(); // transient, like NSPopover
     }
 
@@ -498,7 +351,6 @@ sealed class MirrorForm : Form
         Activate();
         _pollTimer.Start();
         _animTimer.Start();
-        _sweepTimer.Start();
         _ = Tick();
     }
 
@@ -507,7 +359,6 @@ sealed class MirrorForm : Form
         Hide();
         _pollTimer.Stop();
         _animTimer.Stop();
-        _sweepTimer.Stop();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -548,18 +399,6 @@ sealed class MirrorForm : Form
         _brightnessValue.Text = $"{level}%";
     }
 
-    /// One sweep step: push the newest 4Hz sample, refresh the DL/UL readout.
-    void SweepTick()
-    {
-        if (!_mirror.NetMode || !Visible) return;
-        var cur = _netMonitor.Current;
-        var smoothed = _netMonitor.CurrentSmoothed;
-        _mirror.NetHeaderDL = MirrorControl.DeviceSpeedText(smoothed.Rx);
-        _mirror.NetHeaderUL = MirrorControl.DeviceSpeedText(smoothed.Tx);
-        _mirror.NetNetworkName = NetworkNameMonitor.Shared.CurrentName();
-        _mirror.PushNetSample(cur.Rx, cur.Tx);
-    }
-
     async Task Tick()
     {
         DeviceInfo info;
@@ -586,26 +425,16 @@ sealed class MirrorForm : Form
         _modeButtons[modeIdx].Checked = true;
         _applyingMode = false;
         var modeText = info.Mode == "auto" ? "自动切换"
-            : info.Mode == "net" ? "网速曲线"
-            : info.Mode == "cpu" ? "CPU 占用率" : "固定显示";
+            : info.Mode == "clock" ? "时钟" : "固定显示";
         _statusLabel.Text = $"{DeviceClient.ConnectionDescription} · {modeText}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.
     void ApplyScene(DeviceInfo info)
     {
-        var enteringNet = info.Effective == "net" && !_mirror.NetMode;
-        _mirror.NetMode = info.Effective == "net";
-        _mirror.CpuMode = info.Effective == "cpu";
-        if (_mirror.NetMode)
+        _mirror.ClockMode = info.Effective == "clock";
+        if (_mirror.ClockMode)
         {
-            if (enteringNet) _mirror.ResetNetSweep(); // fresh sweep, like the device
-            _mirror.Invalidate();
-            return;
-        }
-        if (_mirror.CpuMode)
-        {
-            _mirror.CpuPercent = SystemStatsMonitor.CpuPercent();
             _mirror.Invalidate();
             return;
         }
@@ -716,7 +545,7 @@ sealed class MirrorForm : Form
 
     void AnimTick()
     {
-        if (_lastInfo == null || _mirror.NetMode || _mirror.CpuMode) return;
+        if (_lastInfo == null || _mirror.ClockMode) return;
 
         // ~400ms red-border flash while an approval is pending (device cadence)
         if (_mirror.NeedsInput)

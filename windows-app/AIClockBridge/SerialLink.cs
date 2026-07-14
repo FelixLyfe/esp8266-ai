@@ -12,7 +12,6 @@ sealed class SerialLink : IDisposable
     const string PreferredPortKey = "usb_preferred_port";
 
     readonly StatusService _service;
-    readonly NetSpeedMonitor _netMonitor;
     readonly System.Windows.Forms.Timer _timer = new() { Interval = 20 };
     readonly List<byte> _rx = new();
     readonly Dictionary<ushort, Pending> _pending = new();
@@ -24,8 +23,7 @@ sealed class SerialLink : IDisposable
     DateTime _lastHeartbeatAt = DateTime.MinValue;
     DateTime _lastDeviceFrameAt = DateTime.MinValue;
     DateTime _lastStatusAt = DateTime.MinValue;
-    DateTime _lastNetAt = DateTime.MinValue;
-    DateTime _lastCpuAt = DateTime.MinValue;
+    DateTime _lastClockAt = DateTime.MinValue;
     ushort _nextSequence = 1;
     bool _legacyProbe;
     bool _outgoingTransferBusy;
@@ -47,10 +45,9 @@ sealed class SerialLink : IDisposable
     public string PortName => _port?.PortName ?? "";
     public event Action Changed;
 
-    public SerialLink(StatusService service, NetSpeedMonitor netMonitor)
+    public SerialLink(StatusService service)
     {
         _service = service;
-        _netMonitor = netMonitor;
         _timer.Tick += (_, _) => Tick();
     }
 
@@ -290,16 +287,10 @@ sealed class SerialLink : IDisposable
             _lastStatusAt = now;
             Enqueue(new USBFrame(USBMessage.Status, TakeSequence(), _service.Snapshot().ToJson()));
         }
-        if (now - _lastNetAt >= TimeSpan.FromSeconds(2))
+        if (now - _lastClockAt >= TimeSpan.FromSeconds(1))
         {
-            _lastNetAt = now;
-            Enqueue(new USBFrame(USBMessage.Net, TakeSequence(),
-                _netMonitor.ToJson(NetworkNameMonitor.Shared.DeviceName())));
-        }
-        if (now - _lastCpuAt >= TimeSpan.FromSeconds(1))
-        {
-            _lastCpuAt = now;
-            Enqueue(new USBFrame(USBMessage.Cpu, TakeSequence(), SystemStatsMonitor.ToJson()));
+            _lastClockAt = now;
+            Enqueue(new USBFrame(USBMessage.Clock, TakeSequence(), ClockSnapshot.Current().ToJson()));
         }
     }
 
@@ -462,8 +453,7 @@ sealed class SerialLink : IDisposable
             {
                 IsLinked = true;
                 _lastStatusAt = DateTime.MinValue;
-                _lastNetAt = DateTime.MinValue;
-                _lastCpuAt = DateTime.MinValue;
+                _lastClockAt = DateTime.MinValue;
                 Console.Error.WriteLine($"[usb] linked {PortName}");
                 NotifyChange();
             }

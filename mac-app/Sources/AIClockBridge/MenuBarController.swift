@@ -20,13 +20,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private lazy var usbReleaseItem = makeItem("释放 USB 用于刷机", #selector(toggleUSBRelease))
     private var modeItems: [String: NSMenuItem] = [:]
 
-    init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
-         serialLink: SerialLink, port: UInt16) {
+    init(service: StatusService, usage: UsageFetcher, serialLink: SerialLink, port: UInt16) {
         self.service = service
         self.usage = usage
         self.port = port
         self.serialLink = serialLink
-        self.mirrorPopover = MirrorPopoverController(service: service, netMonitor: netMonitor)
+        self.mirrorPopover = MirrorPopoverController(service: service)
         super.init()
         buildMenu()
         usage.onUpdate = { [weak self] in self?.refreshUsageLines() }
@@ -99,8 +98,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let displayMenu = NSMenu()
         for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-                              ("固定 Codex", "codex"), ("固定 Cursor", "cursor"), ("网速曲线", "net"),
-                              ("CPU 占用率", "cpu")] {
+                              ("固定 Codex", "codex"), ("固定 Cursor", "cursor"), ("时钟", "clock")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = mode
@@ -225,8 +223,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             case let .success(info):
                 let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
                                info.codexCustomSprite ? "X:自定义" : "X:默认"]
-                let showing = info.mode == "net" ? "网速"
-                    : info.mode == "cpu" ? "CPU"
+                let showing = info.mode == "clock" ? "时钟"
                     : info.showing == "claude" ? "Claude"
                     : info.showing == "codex" ? "Codex"
                     : info.showing == "cursor" ? "Cursor" : "无 AI 登录"

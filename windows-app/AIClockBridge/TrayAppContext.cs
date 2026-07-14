@@ -21,13 +21,12 @@ sealed class TrayAppContext : ApplicationContext
     readonly ToolStripMenuItem _usbReleaseItem = new("释放 USB 用于刷机");
     readonly Dictionary<string, ToolStripMenuItem> _modeItems = new();
 
-    public TrayAppContext(StatusService service, UsageFetcher usage, NetSpeedMonitor netMonitor,
-                          SerialLink serialLink, int port)
+    public TrayAppContext(StatusService service, UsageFetcher usage, SerialLink serialLink, int port)
     {
         _usage = usage;
         _serialLink = serialLink;
         _port = port;
-        _mirror = new MirrorForm(service, netMonitor);
+        _mirror = new MirrorForm(service);
 
         BuildMenu();
         _trayIcon = new NotifyIcon
@@ -91,7 +90,7 @@ sealed class TrayAppContext : ApplicationContext
         {
             ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
             ("固定 Codex", "codex"), ("固定 Cursor", "cursor"),
-            ("网速曲线", "net"), ("CPU 占用率", "cpu"),
+            ("时钟", "clock"),
         })
         {
             var item = new ToolStripMenuItem(title);
@@ -246,8 +245,7 @@ sealed class TrayAppContext : ApplicationContext
             info.ClaudeCustomSprite ? "C:自定义" : "C:默认",
             info.CodexCustomSprite ? "X:自定义" : "X:默认",
         };
-        var showing = info.Mode == "net" ? "网速"
-            : info.Mode == "cpu" ? "CPU"
+        var showing = info.Mode == "clock" ? "时钟"
             : info.Showing == "claude" ? "Claude"
             : info.Showing == "codex" ? "Codex"
             : info.Showing == "cursor" ? "Cursor" : "无 AI 登录";

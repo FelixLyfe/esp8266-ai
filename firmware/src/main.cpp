@@ -74,43 +74,19 @@ unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// net/cpu = show Mac-side telemetry pages instead of the pet.
-enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CURSOR, MODE_NET, MODE_CPU };
+// clock = show the host computer's local time instead of the pet.
+enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CURSOR, MODE_CLOCK };
 DisplayMode displayMode = MODE_AUTO;
 DisplayMode lastEffectiveMode = MODE_AUTO;
 
-// ---------- net speed mode state ----------
-// Rendering is decoupled from the network: pollNet() fetches every 2s and
-// only refills a queue of 250ms samples (the bridge samples at 4Hz and tags
-// them with a running seq, so nothing is drawn twice or skipped). The sweep
-// itself consumes exactly one queued sample every NET_DRAW_INTERVAL_MS, so
-// the trace advances at a constant rate no matter how long HTTP takes.
-const unsigned long NET_POLL_INTERVAL_MS = 2000; // queue refill cadence
-const unsigned long NET_DRAW_INTERVAL_MS = 250;  // one chart step per bridge sample
-const int NET_QUEUE = 32;
-long netQRx[NET_QUEUE], netQTx[NET_QUEUE]; // ring buffer of pending samples
-int netQHead = 0, netQCount = 0;
-long netSeq = -1;                          // last bridge sample seq consumed into the queue
-long netCurRx = 0, netCurTx = 0;           // smoothed readout for the header
-String netNetworkName = "Not connected";
-String netLastNetworkName;
-unsigned long lastNetPollMs = 0;
-unsigned long lastNetDrawMs = 0;
-bool netChromeDrawn = false;
-bool netHeaderDirty = false;
-
-// Chart layout (task-manager style scrolling area chart, newest at the right)
-const int NET_CHART_X = 8, NET_CHART_Y = 60, NET_CHART_W = 224, NET_CHART_H = 128;
-long netHistRx[NET_CHART_W], netHistTx[NET_CHART_W]; // one 250ms sample per column
-long netScale = 10240;    // current "nice" full-scale value (whole chart shares it)
-String netLastDl, netLastUl, netLastScaleText; // change detection for partial redraws
-
-// ---------- CPU mode state ----------
-const unsigned long CPU_POLL_INTERVAL_MS = 1000;
-int cpuPct = 0;
-int cpuLastPct = -1;
-bool cpuChromeDrawn = false;
-unsigned long lastCpuPollMs = 0;
+// ---------- clock mode state ----------
+const unsigned long CLOCK_POLL_INTERVAL_MS = 1000;
+String clockTime = "--:--:--";
+String clockDate = "---- -- --";
+String clockWeekday = "---";
+String clockLastTime, clockLastDate, clockLastWeekday;
+unsigned long lastClockPollMs = 0;
+bool clockChromeDrawn = false;
 
 int claudeFrame = 0;
 int codexFrame = 0;
@@ -773,272 +749,67 @@ bool updateActiveApp() {
   return false;
 }
 
-// ---------- net speed screen ----------
+// ---------- clock screen ----------
 
-String fitText(String s, int maxPx, int font);
-
-String speedText(long bps) {
-  char buf[16];
-  if (bps >= 1000000) snprintf(buf, sizeof(buf), "%.1fM", bps / 1000000.0);
-  else if (bps >= 1000) snprintf(buf, sizeof(buf), "%.0fK", bps / 1000.0);
-  else snprintf(buf, sizeof(buf), "%ldB", bps);
-  return String(buf);
-}
-
-// pushImage() colors must be pre-byte-swapped (this firmware never enables
-// setSwapBytes; see the sprite pipeline). Natural RGB565 -> wire order:
-inline uint16_t swap565(uint16_t c) { return (uint16_t)((c << 8) | (c >> 8)); }
-
-void resetNetChart() {
-  memset(netHistRx, 0, sizeof(netHistRx));
-  memset(netHistTx, 0, sizeof(netHistTx));
-  netScale = 10240;
-  netLastDl = "";
-  netLastUl = "";
-  netLastScaleText = "";
-  netLastNetworkName = "";
-  netQHead = 0;
-  netQCount = 0;
-  netSeq = -1;
-}
-
-// Adaptive full scale: the window's peak always lands at ~87% of the chart
-// height, so the undulation stays visible no matter the absolute speed.
-// (The old 1/2/5 stepped scale could squash everything to under half height.)
-long adaptiveNetScale(long maxV) {
-  long s = maxV + maxV / 7; // ~1.15x headroom above the peak
-  return s > 10240 ? s : 10240;
-}
-
-// Static chrome: labels that never change while in net mode.
-void drawNetChrome() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(0x7BEF, TFT_BLACK);
-  tft.drawString("DOWN", 14, 10, 1);
-  tft.drawString("UP", 134, 10, 1);
-  tft.setTextDatum(TC_DATUM);
-  tft.drawString("MAC NET  -  56s", SCREEN_CX, 226, 1);
-}
-
-void drawNetNetworkIfChanged() {
-  if (netNetworkName == netLastNetworkName) return;
-  netLastNetworkName = netNetworkName;
-  tft.fillRect(8, 192, 224, 24, TFT_BLACK);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(fitText(netNetworkName, 216, 2), SCREEN_CX, 196, 2);
-}
-
-// Header readouts (1s-averaged), each repainted only when its text changes.
-void drawNetHeaderIfChanged() {
-  String dl = speedText(netCurRx) + "/s";
-  String ul = speedText(netCurTx) + "/s";
-  tft.setTextDatum(TL_DATUM);
-  if (dl != netLastDl) {
-    netLastDl = dl;
-    tft.fillRect(12, 20, 116, 28, TFT_BLACK);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString(dl, 12, 20, 4);
-  }
-  if (ul != netLastUl) {
-    netLastUl = ul;
-    tft.fillRect(132, 20, 108, 28, TFT_BLACK);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(ul, 132, 20, 4);
-  }
-}
-
-// Repaints the whole chart region from the sample ring, one row at a time
-// through rowBuf (a single pushImage per row = no clear-then-draw flicker).
-// Download is a dim-green filled area with a bright top edge; upload is a
-// 2px yellow line on top; faint gridlines at 25/50/75%.
-void drawNetChart() {
-  static const uint16_t COL_GRID = swap565(0x2104);   // very dark grey
-  static const uint16_t COL_FILL = swap565(0x02A0);   // dim green
-  static const uint16_t COL_EDGE = swap565(TFT_GREEN);
-  static const uint16_t COL_UL = swap565(TFT_YELLOW);
-  static const uint16_t COL_BLACK = swap565(TFT_BLACK);
-
-  long maxV = 0;
-  for (int i = 0; i < NET_CHART_W; i++) {
-    if (netHistRx[i] > maxV) maxV = netHistRx[i];
-    if (netHistTx[i] > maxV) maxV = netHistTx[i];
-  }
-  netScale = adaptiveNetScale(maxV);
-
-  // Per-column heights (3-tap smoothed), then per-column line "bands": each
-  // band spans from the previous column's height to this one's, so steep
-  // rises/falls render as connected vertical strokes instead of detached
-  // stair-step dots — that's what makes the undulation read as a continuous
-  // line, like the Mac mirror's stroked polyline.
-  static uint8_t hRx[NET_CHART_W], hTx[NET_CHART_W];
-  static uint8_t dlLo[NET_CHART_W], dlHi[NET_CHART_W]; // DL edge band, incl. 3px weight
-  static uint8_t ulLo[NET_CHART_W], ulHi[NET_CHART_W]; // UL line band
-  // The panel is physically tiny (2.7cm across), so the stroke must be much
-  // thicker than the Mac mirror's to read at the same visual weight.
-  const int LINE_T = 10; // stroke thickness in px
-  for (int i = 0; i < NET_CHART_W; i++) {
-    int lo = i > 0 ? i - 1 : 0, hi = i < NET_CHART_W - 1 ? i + 1 : NET_CHART_W - 1;
-    long rx = (netHistRx[lo] + netHistRx[i] + netHistRx[hi]) / 3;
-    long tx = (netHistTx[lo] + netHistTx[i] + netHistTx[hi]) / 3;
-    int hr = (int)((float)rx / netScale * (NET_CHART_H - 2));
-    int ht = (int)((float)tx / netScale * (NET_CHART_H - 2));
-    hRx[i] = (uint8_t)constrain(hr, 0, NET_CHART_H - 1);
-    hTx[i] = (uint8_t)constrain(ht, 0, NET_CHART_H - 1);
-  }
-  for (int i = 0; i < NET_CHART_W; i++) {
-    int prevR = i > 0 ? hRx[i - 1] : hRx[0];
-    int prevT = i > 0 ? hTx[i - 1] : hTx[0];
-    dlHi[i] = (uint8_t)max((int)hRx[i], prevR);
-    dlLo[i] = (uint8_t)max(0, min((int)hRx[i], prevR) - (LINE_T - 1));
-    ulHi[i] = (uint8_t)max((int)hTx[i], prevT);
-    ulLo[i] = (uint8_t)max(0, min((int)hTx[i], prevT) - (LINE_T - 1));
-  }
-
-  for (int row = 0; row < NET_CHART_H; row++) {
-    int yFromBot = NET_CHART_H - 1 - row;
-    bool gridRow = (row == NET_CHART_H / 4 || row == NET_CHART_H / 2 || row == 3 * NET_CHART_H / 4);
-    for (int i = 0; i < NET_CHART_W; i++) {
-      uint16_t c = gridRow ? COL_GRID : COL_BLACK;
-      if (yFromBot <= dlHi[i] && yFromBot >= dlLo[i]) c = COL_EDGE;
-      else if (yFromBot < dlLo[i]) c = COL_FILL;
-      if (ulHi[i] > 0 && yFromBot <= ulHi[i] && yFromBot >= ulLo[i]) c = COL_UL;
-      rowBuf[i] = c;
-    }
-    tft.pushImage(NET_CHART_X, NET_CHART_Y + row, NET_CHART_W, 1, rowBuf);
-    if ((row & 31) == 31) yield();
-  }
-
-  // axis label (outside the chart, so it never gets repainted over)
-  String scaleText = speedText(netScale);
-  if (scaleText != netLastScaleText) {
-    netLastScaleText = scaleText;
-    tft.fillRect(120, 48, 112, 10, TFT_BLACK);
-    tft.setTextDatum(TR_DATUM);
-    tft.setTextColor(0x7BEF, TFT_BLACK);
-    tft.drawString(scaleText, NET_CHART_X + NET_CHART_W, 48, 1);
-    tft.setTextDatum(TL_DATUM);
-  }
-}
-
-// Chart tick, every NET_DRAW_INTERVAL_MS: shift in queued sample(s), then
-// one atomic repaint. If the queue backs up after a slow poll, it works off
-// up to three samples per tick until it's back in step.
-void netDrawTick() {
-  if (!netChromeDrawn) {
-    resetNetChart();
-    drawNetChrome();
-    netChromeDrawn = true;
-    netHeaderDirty = true;
-  }
-  if (netHeaderDirty) {
-    drawNetHeaderIfChanged();
-    drawNetNetworkIfChanged();
-    netHeaderDirty = false;
-  }
-  if (netQCount == 0) return;
-  int steps = min(netQCount, netQCount > 16 ? 3 : 1);
-  while (steps-- > 0 && netQCount > 0) {
-    memmove(netHistRx, netHistRx + 1, sizeof(long) * (NET_CHART_W - 1));
-    memmove(netHistTx, netHistTx + 1, sizeof(long) * (NET_CHART_W - 1));
-    netHistRx[NET_CHART_W - 1] = netQRx[netQHead];
-    netHistTx[NET_CHART_W - 1] = netQTx[netQHead];
-    netQHead = (netQHead + 1) % NET_QUEUE;
-    netQCount--;
-  }
-  drawNetChart();
-}
-
-// Ingests one /net payload (from HTTP polling or a serial #NET frame) into
-// the sample queue. The seq field tells us which samples we've already
-// queued, so overlapping tails are fine.
-bool handleNetPayload(const String &payload) {
-  JsonDocument doc;
-  if (deserializeJson(doc, payload)) return false;
-  netCurRx = doc["rx_bps"] | 0L;
-  netCurTx = doc["tx_bps"] | 0L;
-  netNetworkName = doc["network_name"] | "Not connected";
-  netHeaderDirty = true;
-  long seq = doc["seq"] | -1L;
-  JsonArray rx = doc["rx"], tx = doc["tx"];
-  int n = min(rx.size(), tx.size());
-  // how many of the tail samples are new to us
-  int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
-  if (fresh < 0) fresh = 0;
-  for (int i = n - fresh; i < n; i++) {
-    if (netQCount >= NET_QUEUE) break; // queue full: drop the excess
-    int tail = (netQHead + netQCount) % NET_QUEUE;
-    netQRx[tail] = rx[i].as<long>();
-    netQTx[tail] = tx[i].as<long>();
-    netQCount++;
-  }
-  if (seq >= 0) netSeq = seq;
-  return true;
-}
-
-// Refills the sample queue from the bridge's /net endpoint.
-void pollNet() {
-  if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
-  WiFiClient client;
-  HTTPClient http;
-  String url = "http://" + bridgeHost + "/net";
-  http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return;
-  int code = http.GET();
-  if (code == HTTP_CODE_OK) handleNetPayload(http.getString());
-  http.end();
-}
-
-String fitText(String s, int maxPx, int font) {
-  if (tft.textWidth(s, font) <= maxPx) return s;
-  while (s.length() > 0 && tft.textWidth(s + "...", font) > maxPx) {
-    s.remove(s.length() - 1);
-  }
-  return s + "...";
-}
-
-void drawCPUScreen() {
-  if (!cpuChromeDrawn) {
+void drawClockScreen() {
+  if (!clockChromeDrawn) {
     tft.fillScreen(TFT_BLACK);
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    tft.drawString("MAC CPU", SCREEN_CX, 22, 4);
-    tft.drawString("SYSTEM LOAD", SCREEN_CX, 202, 2);
-    cpuChromeDrawn = true;
-    cpuLastPct = -1;
+    tft.setTextSize(1);
+    tft.drawString("LOCAL TIME", SCREEN_CX, 28, 2);
+    clockChromeDrawn = true;
+    clockLastTime = "";
+    clockLastDate = "";
+    clockLastWeekday = "";
   }
-  if (cpuPct == cpuLastPct) return;
-  cpuLastPct = cpuPct;
-  uint16_t color = cpuPct >= 85 ? TFT_RED : cpuPct >= 60 ? TFT_YELLOW : TFT_GREEN;
-  tft.fillRect(0, 58, SCREEN_W, 86, TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.setTextSize(2);
-  tft.drawString(String(cpuPct) + "%", SCREEN_CX, 100, 4);
-  tft.setTextSize(1);
-  const int bx = 20, by = 160, bw = 200, bh = 18;
-  tft.fillRect(bx, by, bw, bh, 0x3186);
-  tft.fillRect(bx, by, bw * cpuPct / 100, bh, color);
+  tft.setTextDatum(TC_DATUM);
+  if (clockTime != clockLastTime) {
+    clockLastTime = clockTime;
+    tft.fillRect(0, 66, SCREEN_W, 64, TFT_BLACK);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.drawString(clockTime, SCREEN_CX, 76, 2);
+    tft.setTextSize(1);
+  }
+  if (clockDate != clockLastDate) {
+    clockLastDate = clockDate;
+    tft.fillRect(0, 148, SCREEN_W, 30, TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(clockDate, SCREEN_CX, 150, 4);
+  }
+  if (clockWeekday != clockLastWeekday) {
+    clockLastWeekday = clockWeekday;
+    tft.fillRect(0, 190, SCREEN_W, 24, TFT_BLACK);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString(clockWeekday, SCREEN_CX, 194, 2);
+  }
 }
 
-bool handleCPUPayload(const String &payload) {
+bool handleClockPayload(const String &payload) {
   JsonDocument doc;
   if (deserializeJson(doc, payload)) return false;
-  cpuPct = constrain(doc["cpu_pct"] | 0, 0, 100);
-  if (displayMode == MODE_CPU) drawCPUScreen();
+  const char *timeValue = doc["time"] | (const char *)nullptr;
+  const char *dateValue = doc["date"] | (const char *)nullptr;
+  const char *weekdayValue = doc["weekday"] | (const char *)nullptr;
+  if (!timeValue || !dateValue || !weekdayValue
+      || strlen(timeValue) != 8 || strlen(dateValue) != 10 || strlen(weekdayValue) != 3) return false;
+  clockTime = timeValue;
+  clockDate = dateValue;
+  clockWeekday = weekdayValue;
+  if (displayMode == MODE_CLOCK) drawClockScreen();
   return true;
 }
 
-void pollCPU() {
+void pollClock() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return;
   WiFiClient client;
   HTTPClient http;
-  String url = "http://" + bridgeHost + "/cpu";
+  String url = "http://" + bridgeHost + "/clock";
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) handleCPUPayload(http.getString());
+  if (code == HTTP_CODE_OK) handleClockPayload(http.getString());
   http.end();
 }
 
@@ -1209,7 +980,7 @@ void pollBridge() {
   }
   http.end();
   DisplayMode eff = effectiveMode();
-  if (eff != MODE_NET && eff != MODE_CPU) {
+  if (eff != MODE_CLOCK) {
     // Only a real app switch clears the screen; a plain data refresh paints
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
@@ -1223,7 +994,7 @@ void pollBridge() {
 // RGB565 resources are transferred as acknowledged binary chunks.
 enum USBMessage : uint8_t {
   USB_HELLO = 0x01, USB_HELLO_ACK = 0x02, USB_HEARTBEAT = 0x03, USB_HEARTBEAT_ACK = 0x04,
-  USB_STATUS = 0x10, USB_NET = 0x11, USB_CPU = 0x12,
+  USB_STATUS = 0x10, USB_CLOCK = 0x13,
   USB_GET_INFO = 0x20, USB_DEVICE_INFO = 0x21, USB_COMMAND = 0x22, USB_GET_RESOURCE = 0x23,
   USB_RESOURCE_BEGIN = 0x30, USB_RESOURCE_CHUNK = 0x31, USB_RESOURCE_END = 0x32, USB_ACK = 0x7E
 };
@@ -1321,8 +1092,7 @@ bool handleUSBCommand(const uint8_t *payload, size_t len) {
     else if (m == "claude") displayMode = MODE_CLAUDE;
     else if (m == "codex") displayMode = MODE_CODEX;
     else if (m == "cursor") displayMode = MODE_CURSOR;
-    else if (m == "net") displayMode = MODE_NET;
-    else if (m == "cpu") displayMode = MODE_CPU;
+    else if (m == "clock") displayMode = MODE_CLOCK;
     else return false;
   }
   const char *bridge = doc["bridge"] | (const char *)nullptr;
@@ -1452,14 +1222,13 @@ void handleUSBFrame(uint8_t type, uint16_t seq, const uint8_t *payload, size_t l
     if (parseStatusJson(usbPayloadString(payload, len))) {
       lastSuccessMs = millis(); everPolled = true; showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
-      if (eff != MODE_NET && eff != MODE_CPU) {
+      if (eff != MODE_CLOCK) {
         if (updateActiveApp()) drawActiveApp(); else refreshActiveApp();
       }
     }
     return;
   }
-  if (type == USB_NET) { handleNetPayload(usbPayloadString(payload, len)); return; }
-  if (type == USB_CPU) { handleCPUPayload(usbPayloadString(payload, len)); return; }
+  if (type == USB_CLOCK) { handleClockPayload(usbPayloadString(payload, len)); return; }
   if (type == USB_GET_INFO) { usbSendString(USB_DEVICE_INFO, seq, buildDeviceInfoJson()); return; }
   if (type == USB_COMMAND) { usbSendAck(seq, handleUSBCommand(payload, len) ? 0 : 1); return; }
   if (type == USB_RESOURCE_BEGIN) { usbSendAck(seq, beginUSBTransfer(payload, len) ? 0 : 1); return; }
@@ -1611,8 +1380,7 @@ const char *displayModeName(DisplayMode m) {
   if (m == MODE_CLAUDE) return "claude";
   if (m == MODE_CODEX) return "codex";
   if (m == MODE_CURSOR) return "cursor";
-  if (m == MODE_NET) return "net";
-  if (m == MODE_CPU) return "cpu";
+  if (m == MODE_CLOCK) return "clock";
   return "auto";
 }
 
@@ -1659,22 +1427,18 @@ void handleApiDisplay() {
   else if (mode == "claude") displayMode = MODE_CLAUDE;
   else if (mode == "codex") displayMode = MODE_CODEX;
   else if (mode == "cursor") displayMode = MODE_CURSOR;
-  else if (mode == "net") displayMode = MODE_NET;
-  else if (mode == "cpu") displayMode = MODE_CPU;
+  else if (mode == "clock") displayMode = MODE_CLOCK;
   else {
-    webServer.send(400, "text/plain", "mode must be auto|claude|codex|cursor|net|cpu");
+    webServer.send(400, "text/plain", "mode must be auto|claude|codex|cursor|clock");
     return;
   }
   Serial.printf("[api] display mode = %s\n", mode.c_str());
-  if (displayMode == MODE_NET) {
-    netChromeDrawn = false;
-    lastNetPollMs = 0; // poll + draw on the next loop tick
-  } else if (displayMode == MODE_CPU) {
-    cpuChromeDrawn = false;
-    lastCpuPollMs = 0; // poll + draw on the next loop tick
+  if (displayMode == MODE_CLOCK) {
+    clockChromeDrawn = false;
+    lastClockPollMs = 0; // poll + draw on the next loop tick
   } else {
     updateActiveApp();
-    drawActiveApp(); // unconditional: also repaints over a previous net chart
+    drawActiveApp(); // unconditional: also repaints over a previous clock page
   }
   webServer.send(200, "text/plain", "ok");
 }
@@ -2050,34 +1814,20 @@ void loop() {
   DisplayMode eff = effectiveMode();
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
-    if (eff == MODE_NET) {
-      netChromeDrawn = false;
-      lastNetPollMs = 0;
-    } else if (eff == MODE_CPU) {
-      cpuChromeDrawn = false;
-      lastCpuPollMs = 0;
-      drawCPUScreen();
+    if (eff == MODE_CLOCK) {
+      clockChromeDrawn = false;
+      lastClockPollMs = 0;
+      drawClockScreen();
     } else {
       updateActiveApp();
       drawActiveApp();
     }
   }
 
-  if (eff == MODE_NET) {
-    // net-speed mode: rendering (constant-rate sweep) is independent of the
-    // bridge polls that refill its sample queue
-    if (nowMs - lastNetDrawMs >= NET_DRAW_INTERVAL_MS) {
-      lastNetDrawMs = nowMs;
-      netDrawTick();
-    }
-    if (nowMs - lastNetPollMs >= NET_POLL_INTERVAL_MS) {
-      lastNetPollMs = nowMs;
-      if (!wiredActive()) pollNet();
-    }
-  } else if (eff == MODE_CPU) {
-    if (nowMs - lastCpuPollMs >= CPU_POLL_INTERVAL_MS) {
-      lastCpuPollMs = nowMs;
-      if (!wiredActive()) pollCPU();
+  if (eff == MODE_CLOCK) {
+    if (nowMs - lastClockPollMs >= CLOCK_POLL_INTERVAL_MS) {
+      lastClockPollMs = nowMs;
+      if (!wiredActive()) pollClock();
     }
   } else {
     // sprite walk-cycle animation (only advances while that app is showing)

@@ -28,8 +28,7 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 | | |
 |---|---|
 | <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Claude/Codex show working state; all three show quota. Cursor is quota-only: its ring is Total and the bottom row shows Auto / API remaining. Only signed-in providers with a successful quota fetch are shown. |
-| <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis, and the current computer's network name. |
-| CPU | **CPU usage**<br>A dedicated page shows the current computer's system CPU usage, status color, and progress bar in real time. |
+| Clock | **Local clock**<br>A dedicated page shows the computer's local time, date, and weekday, synchronized to the device over USB or WiFi fallback. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
 ## Getting started
@@ -61,7 +60,7 @@ Normal macOS and Windows use can skip this step. When USB or the bridge app is u
   <img src="docs/images/working.jpg" width="640" alt="In action">
 </p>
 
-Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, CPU/network pages, and more).
+Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, the clock page, and more).
 
 ## FAQ
 
