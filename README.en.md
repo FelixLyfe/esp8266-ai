@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://mac.qust.me">Website</a> ·
   <a href="https://mac.qust.me/#flash">Web Flasher</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">Download</a>
+  <a href="https://github.com/FelixLyfe/esp8266-ai/releases/latest">Download</a>
 </p>
 
 <p align="center">
@@ -41,13 +41,13 @@ Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug
 
 > Serial port not showing up? On Windows install the [CH340 driver](https://www.wch.cn/downloads/CH341SER_EXE.html); macOS has it built in. Try another USB cable (many are charge-only). More troubleshooting in the [website FAQ](https://mac.qust.me/#flash-faq).
 >
-> Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) to address `0x0` with esptool.
+> Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/FelixLyfe/esp8266-ai/releases/latest) to address `0x0` with esptool.
 
 ### Step 2 · Install the bridge app
 
-Download from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) and open:
+Download from [Releases](https://github.com/FelixLyfe/esp8266-ai/releases/latest) and open:
 
-- **macOS**: `AIClockBridge-*-macOS.dmg`, drag into Applications (ad-hoc signed; allow it in "System Settings → Privacy & Security" on first launch). Keep the USB data cable connected and start the app; it handshakes automatically, with **no WiFi setup required**.
+- **macOS**: `AIClockBridge-*-macOS-arm64.dmg`, drag into Applications (Apple Silicon ARM64, ad-hoc signed; allow it in "System Settings → Privacy & Security" on first launch). Keep the USB data cable connected and start the app; it handshakes automatically, with **no WiFi setup required**.
 - **Windows**: `AIClockBridge-*-Windows-x64.exe`, just double-click. Keep the USB data cable connected and the app handshakes automatically, with **no WiFi setup required**. Install the CH340 driver first if no COM port appears.
 
 The bridge owns the USB serial port while connected. Use “Release USB for flashing” in its menu before web/PlatformIO flashing; it resumes after the device is re-enumerated. Firmware waits five seconds for USB at boot, keeps WiFi off while USB is healthy, and starts WiFi fallback after five seconds without the link.

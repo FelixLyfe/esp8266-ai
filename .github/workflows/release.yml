@@ -1,0 +1,241 @@
+name: Build release packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - id: version
+        name: Check synchronized version fields
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$(python3 tools/check_release_version.py --tag "$GITHUB_REF_NAME")"
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+              echo "Tag $GITHUB_REF_NAME does not point to a commit on origin/main" >&2
+              exit 1
+            fi
+          else
+            version="$(python3 tools/check_release_version.py)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Build macOS ARM64 DMG
+    needs: validate
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Package application
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          ./mac-app/package-macos.sh "$VERSION"
+
+          app="dist/AIClockBridge.app"
+          source="dist/AIClockBridge-$VERSION-macOS.dmg"
+          target="dist/AIClockBridge-$VERSION-macOS-arm64.dmg"
+          test "$(lipo -archs "$app/Contents/MacOS/AIClockBridge")" = "arm64"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          mv "$source" "$target"
+          hdiutil verify "$target"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-package
+          path: dist/AIClockBridge-${{ needs.validate.outputs.version }}-macOS-arm64.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Build Windows x64 executable
+    needs: validate
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+      - name: Package application
+        shell: pwsh
+        run: |
+          & ./windows-app/package-windows.ps1
+          $package = "dist/AIClockBridge-$env:VERSION-Windows-x64.exe"
+          if (-not (Test-Path $package -PathType Leaf)) {
+            throw "Missing Windows package: $package"
+          }
+          if ((Get-Item $package).Length -le 0) {
+            throw "Windows package is empty: $package"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-package
+          path: dist/AIClockBridge-${{ needs.validate.outputs.version }}-Windows-x64.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  firmware:
+    name: Build ESP8266 firmware
+    needs: validate
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      PLATFORMIO_CORE_DIR: ${{ github.workspace }}/.platformio
+      PLATFORMIO_SETTING_ENABLE_TELEMETRY: "no"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install PlatformIO Core
+        run: python3 -m pip install --disable-pip-version-check platformio==6.1.19
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          pio run -d firmware
+          mkdir -p dist
+          target="dist/esp8266-ai-firmware-$VERSION.bin"
+          cp firmware/.pio/build/nodemcuv2/firmware.bin "$target"
+          test -s "$target"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-package
+          path: dist/esp8266-ai-firmware-${{ needs.validate.outputs.version }}.bin
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble release bundle
+    needs: [validate, macos, windows, firmware]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "*-package"
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            "AIClockBridge-$VERSION-macOS-arm64.dmg"
+            "AIClockBridge-$VERSION-Windows-x64.exe"
+            "esp8266-ai-firmware-$VERSION.bin"
+          )
+          for file in "${expected[@]}"; do
+            test -s "dist/$file"
+          done
+
+          mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+          diff <(printf '%s\n' "${wanted[@]}") <(printf '%s\n' "${actual[@]}")
+
+          (
+            cd dist
+            sha256sum "${expected[@]}" > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle-${{ needs.validate.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [validate, assemble]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundle-${{ needs.validate.outputs.version }}
+          path: dist
+      - name: Verify release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check SHA256SUMS.txt
+          test "$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')" = "4"
+      - name: Create public release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+
+          release_created=false
+          cleanup_release() {
+            status=$?
+            if [[ $status -ne 0 ]]; then
+              is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
+              if [[ "$release_created" == "true" || "$is_draft" == "true" ]]; then
+                gh release delete "$TAG" --yes || true
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_release EXIT
+
+          gh release create "$TAG" dist/* \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "AI Clock $TAG"
+          release_created=true
+
+          test "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" = "true"
+
+          expected="$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)"
+          actual="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+          diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+
+          gh release edit "$TAG" --draft=false --latest
+          test "$(gh release view "$TAG" --json isDraft --jq '.isDraft')" = "false"
+          gh release view "$TAG" --json url --jq '.url'
+          trap - EXIT

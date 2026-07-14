@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://mac.qust.me">官网</a> ·
   <a href="https://mac.qust.me/#flash">网页刷机</a> ·
-  <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">下载</a>
+  <a href="https://github.com/FelixLyfe/esp8266-ai/releases/latest">下载</a>
 </p>
 
 <p align="center">
@@ -41,13 +41,13 @@
 
 > 弹窗里看不到串口？Windows 需要装 [CH340 驱动](https://www.wch.cn/downloads/CH341SER_EXE.html)，Mac 系统自带无需安装；换根 USB 线（很多线只能充电）；更多排查见[官网 FAQ](https://mac.qust.me/#flash-faq)。
 >
-> 命令行党也可以用 esptool 把 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 里的 `esp8266-ai-firmware-*.bin` 刷到 `0x0`。
+> 命令行党也可以用 esptool 把 [Releases](https://github.com/FelixLyfe/esp8266-ai/releases/latest) 里的 `esp8266-ai-firmware-*.bin` 刷到 `0x0`。
 
 ### 第 2 步 · 装桥接程序
 
-从 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 下载并打开：
+从 [Releases](https://github.com/FelixLyfe/esp8266-ai/releases/latest) 下载并打开：
 
-- **macOS**：`AIClockBridge-*-macOS.dmg`，拖入 Applications（ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许）。保持 USB 数据线连接并启动应用，设备会自动握手，**无需配 WiFi**。
+- **macOS**：`AIClockBridge-*-macOS-arm64.dmg`，拖入 Applications（Apple Silicon ARM64，ad-hoc 签名，首次启动需在「系统设置 → 隐私与安全性」允许）。保持 USB 数据线连接并启动应用，设备会自动握手，**无需配 WiFi**。
 - **Windows**：`AIClockBridge-*-Windows-x64.exe`，双击即用。保持 USB 数据线连接并启动应用，设备会自动握手，**无需配 WiFi**；首次使用若看不到 COM 口，请先安装 CH340 驱动。
 
 桥接程序常驻菜单栏/系统托盘并独占 USB 串口；右键菜单可选择「释放 USB 用于刷机」，设备重新枚举后自动恢复。设备上电先等待 USB 5 秒；USB 在线时 WiFi 保持关闭，连续 5 秒失联才启动 WiFi 回退。
