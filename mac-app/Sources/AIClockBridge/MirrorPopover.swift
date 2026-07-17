@@ -93,8 +93,8 @@ final class MirrorView: NSView {
             return
         }
 
-        // square quota ring: margin 4, thickness 10, clockwise from top-left
-        let m: CGFloat = 4, t: CGFloat = 10
+        // square quota ring: margin 1, thickness 6, clockwise from top-left
+        let m: CGFloat = 1, t: CGFloat = 6
         let side: CGFloat = 240 - 2 * m
         let color = showingProvider == "cursor" && ringPct <= 0 ? NSColor.systemRed
             : deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
@@ -495,19 +495,19 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func ensureSprite(_ info: DeviceInfo) {
-        if info.showing == "cursor" {
+        if info.showing == "cursor", !info.cursorCustomSprite {
             mirror.frames = Self.cursorSpriteFrames
             mirror.spriteW = Self.cursorSpriteW
             mirror.spriteH = Self.cursorSpriteH
             return
         }
-        guard info.showing == "claude" || info.showing == "codex" else {
+        guard info.showing == "claude" || info.showing == "codex" || info.showing == "cursor" else {
             mirror.frames = []
             return
         }
-        let slot = info.showing == "codex" ? "codex" : "claude"
-        let w = slot == "claude" ? info.claudeW : info.codexW
-        let h = slot == "claude" ? info.claudeH : info.codexH
+        let slot = info.showing
+        let w = slot == "claude" ? info.claudeW : slot == "codex" ? info.codexW : info.cursorW
+        let h = slot == "claude" ? info.claudeH : slot == "codex" ? info.codexH : info.cursorH
         if let cached = spriteCache[slot], cached.rev == info.spriteRev {
             mirror.frames = cached.frames
             mirror.spriteW = cached.w
@@ -523,7 +523,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 let frames = decodeSpriteFrames(data, w: w, h: h)
                 guard !frames.isEmpty else { return }
                 self.spriteCache[slot] = (info.spriteRev, frames, w, h)
-                if (self.lastInfo?.showing == "codex" ? "codex" : "claude") == slot {
+                if self.lastInfo?.showing == slot {
                     self.mirror.frames = frames
                     self.mirror.spriteW = w
                     self.mirror.spriteH = h

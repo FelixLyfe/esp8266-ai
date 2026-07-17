@@ -15,8 +15,10 @@ struct DeviceInfo {
     var brightness = 100    // backlight 0-100 (0 = off)
     var claudeCustomSprite = false
     var codexCustomSprite = false
+    var cursorCustomSprite = false
     var claudeW = 111, claudeH = 120
     var codexW = 120, codexH = 120
+    var cursorW = 96, cursorH = 104
 }
 
 final class DeviceClient {
@@ -99,7 +101,7 @@ final class DeviceClient {
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
     }
 
-    /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
+    /// POST /sprite/{claude|codex|cursor}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.
     static func uploadGif(_ gif: Data, slot: String, completion: @escaping (Error?) -> Void) {
         if let usb = usbLink, usb.isLinked {
@@ -125,7 +127,7 @@ final class DeviceClient {
         run(req, completion: completion)
     }
 
-    /// POST /sprite/{claude|codex}/reset — back to the compiled-in animation.
+    /// POST /sprite/{claude|codex|cursor}/reset — back to the compiled-in animation.
     static func resetSprite(slot: String, completion: @escaping (Error?) -> Void) {
         if let usb = usbLink, usb.isLinked {
             usb.sendCommand(["reset_sprite": slot], completion: completion)
@@ -134,7 +136,7 @@ final class DeviceClient {
         postForm(path: "sprite/\(slot)/reset", fields: [:], completion: completion)
     }
 
-    /// GET /sprite/{claude|codex}/raw — the animation the device is actually
+    /// GET /sprite/{claude|codex|cursor}/raw — the animation the device is actually
     /// using, wire format [1 byte frame count][RGB565 big-endian frames...].
     static func fetchSpriteRaw(slot: String, completion: @escaping (Result<Data, Error>) -> Void) {
         if let usb = usbLink, usb.isLinked {
@@ -178,12 +180,16 @@ final class DeviceClient {
         info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
         let claude = obj["claude"] as? [String: Any]
         let codex = obj["codex"] as? [String: Any]
+        let cursor = obj["cursor"] as? [String: Any]
         info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
         info.codexCustomSprite = codex?["custom_sprite"] as? Bool ?? false
+        info.cursorCustomSprite = cursor?["custom_sprite"] as? Bool ?? false
         info.claudeW = (claude?["w"] as? NSNumber)?.intValue ?? 111
         info.claudeH = (claude?["h"] as? NSNumber)?.intValue ?? 120
         info.codexW = (codex?["w"] as? NSNumber)?.intValue ?? 120
         info.codexH = (codex?["h"] as? NSNumber)?.intValue ?? 120
+        info.cursorW = (cursor?["w"] as? NSNumber)?.intValue ?? 96
+        info.cursorH = (cursor?["h"] as? NSNumber)?.intValue ?? 104
         return .success(info)
     }
 

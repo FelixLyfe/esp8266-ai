@@ -50,9 +50,18 @@ final class SerialLink {
 
     func start() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
+        timer = Self.scheduleLoopTimer { [weak self] in self?.tick() }
+    }
+
+    @discardableResult
+    static func scheduleLoopTimer(interval: TimeInterval = 0.02,
+                                  handler: @escaping () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in handler() }
+        // NSMenu tracks in NSEventTrackingRunLoopMode. A default-mode timer
+        // pauses while the status-item menu is open, starving the USB heartbeat
+        // until both sides hit their five-second disconnect timeout.
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
     var connectionDescription: String {
@@ -114,7 +123,13 @@ final class SerialLink {
     }
 
     func uploadGif(_ data: Data, slot: String, completion: @escaping (Error?) -> Void) {
-        let resource: USBResource = slot == "codex" ? .codexGif : .claudeGif
+        let resource: USBResource
+        switch slot {
+        case "claude": resource = .claudeGif
+        case "codex": resource = .codexGif
+        case "cursor": resource = .cursorGif
+        default: completion(Self.badPayloadError); return
+        }
         sendTransfer(resource: resource, data: data, endTimeout: 60, completion: completion)
     }
 
@@ -128,7 +143,13 @@ final class SerialLink {
         guard incomingCompletion == nil else {
             completion(.failure(Self.busyError)); return
         }
-        let resource: USBResource = slot == "codex" ? .codexSprite : .claudeSprite
+        let resource: USBResource
+        switch slot {
+        case "claude": resource = .claudeSprite
+        case "codex": resource = .codexSprite
+        case "cursor": resource = .cursorSprite
+        default: completion(.failure(Self.badPayloadError)); return
+        }
         incomingResource = resource
         incomingExpected = 0
         incomingData.removeAll(keepingCapacity: true)

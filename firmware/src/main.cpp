@@ -29,19 +29,21 @@ ESP8266WebServer webServer(80);
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
-// firmware rebuild. You POST a raw .gif straight to /sprite/claude or
-// /sprite/codex (the device serves its own upload page at "/"); the ESP8266
+// firmware rebuild. You POST a raw .gif straight to /sprite/claude,
+// /sprite/codex or /sprite/cursor (the device serves its own upload page at "/"); the ESP8266
 // decodes and rescales the GIF *on-device* (AnimatedGIF, line-by-line so it
 // never needs a full-canvas buffer) into the wire format below, which the
 // display path then reads back frame-by-frame:
 //   [1 byte frame count][frame0 bytes][frame1 bytes]...
-// Each frame is exactly CLAUDE_SPRITE_W x H (or CODEX_SPRITE_W x H) RGB565
+// Each frame uses the selected Claude, Codex or Cursor sprite dimensions in RGB565
 // pixels, byte order matching tools/convert_sprites.py's to_rgb565() so the
 // compiled-in defaults and custom uploads share one draw path.
 const char *CLAUDE_SPRITE_FILE = "/c.bin";
 const char *CODEX_SPRITE_FILE = "/x.bin";
+const char *CURSOR_SPRITE_FILE = "/r.bin";
 const char *CLAUDE_GIF_FILE = "/c.gif"; // raw upload, decoded then removed
 const char *CODEX_GIF_FILE = "/x.gif";
+const char *CURSOR_GIF_FILE = "/r.gif";
 const char *USB_TRANSFER_FILE = "/usb.tmp";
 const int MAX_CUSTOM_FRAMES = 8;
 const size_t CLAUDE_FRAME_BYTES = (size_t)CLAUDE_SPRITE_W * CLAUDE_SPRITE_H * 2;
@@ -60,11 +62,13 @@ bool claudeCustom = false;
 int claudeCustomFrames = 0;
 bool codexCustom = false;
 int codexCustomFrames = 0;
+bool cursorCustom = false;
+int cursorCustomFrames = 0;
 uint32_t spriteRev = 2026071401UL; // default asset revision; bumped again on upload/reset
 
 const int SCREEN_CX = 120, SCREEN_CY = 120;
-const int RING_MARGIN = 4;      // inset from screen edge
-const int RING_THICKNESS = 10;  // ring bar thickness
+const int RING_MARGIN = 1;     // inset from screen edge
+const int RING_THICKNESS = 6;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
@@ -206,6 +210,7 @@ void saveBridgeHost(const String &host) {
 // size before trusting it (frame count byte + exact expected byte length).
 void loadCustomSpriteState() {
   claudeCustom = false;
+  claudeCustomFrames = 0;
   if (LittleFS.exists(CLAUDE_SPRITE_FILE)) {
     File f = LittleFS.open(CLAUDE_SPRITE_FILE, "r");
     if (f && f.size() >= 1) {
@@ -220,6 +225,7 @@ void loadCustomSpriteState() {
   }
 
   codexCustom = false;
+  codexCustomFrames = 0;
   if (LittleFS.exists(CODEX_SPRITE_FILE)) {
     File f = LittleFS.open(CODEX_SPRITE_FILE, "r");
     if (f && f.size() >= 1) {
@@ -233,12 +239,85 @@ void loadCustomSpriteState() {
     if (f) f.close();
   }
 
-  Serial.printf("[sprite] claude custom=%d frames=%d | codex custom=%d frames=%d\n", claudeCustom,
-                claudeCustomFrames, codexCustom, codexCustomFrames);
+  cursorCustom = false;
+  cursorCustomFrames = 0;
+  if (LittleFS.exists(CURSOR_SPRITE_FILE)) {
+    File f = LittleFS.open(CURSOR_SPRITE_FILE, "r");
+    if (f && f.size() >= 1) {
+      uint8_t cnt = f.read();
+      size_t expected = 1 + (size_t)cnt * CURSOR_FRAME_BYTES;
+      if (cnt > 0 && cnt <= MAX_CUSTOM_FRAMES && (size_t)f.size() == expected) {
+        cursorCustom = true;
+        cursorCustomFrames = cnt;
+      }
+    }
+    if (f) f.close();
+  }
+
+  Serial.printf("[sprite] claude custom=%d frames=%d | codex custom=%d frames=%d | cursor custom=%d frames=%d\n",
+                claudeCustom, claudeCustomFrames, codexCustom, codexCustomFrames,
+                cursorCustom, cursorCustomFrames);
 }
 
 int claudeFrameCount() { return claudeCustom ? claudeCustomFrames : CLAUDE_SPRITE_FRAMES; }
 int codexFrameCount() { return codexCustom ? codexCustomFrames : CODEX_SPRITE_FRAMES; }
+int cursorFrameCount() { return cursorCustom ? cursorCustomFrames : CURSOR_SPRITE_FRAMES; }
+
+const char *spriteFileFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return CLAUDE_SPRITE_FILE;
+  if (slot == APP_CODEX) return CODEX_SPRITE_FILE;
+  if (slot == APP_CURSOR) return CURSOR_SPRITE_FILE;
+  return nullptr;
+}
+
+const char *gifFileFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return CLAUDE_GIF_FILE;
+  if (slot == APP_CODEX) return CODEX_GIF_FILE;
+  if (slot == APP_CURSOR) return CURSOR_GIF_FILE;
+  return nullptr;
+}
+
+int spriteWidthFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return CLAUDE_SPRITE_W;
+  if (slot == APP_CODEX) return CODEX_SPRITE_W;
+  return slot == APP_CURSOR ? CURSOR_SPRITE_W : 0;
+}
+
+int spriteHeightFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return CLAUDE_SPRITE_H;
+  if (slot == APP_CODEX) return CODEX_SPRITE_H;
+  return slot == APP_CURSOR ? CURSOR_SPRITE_H : 0;
+}
+
+bool customSpriteFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return claudeCustom;
+  if (slot == APP_CODEX) return codexCustom;
+  return slot == APP_CURSOR && cursorCustom;
+}
+
+int spriteFrameCountFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return claudeFrameCount();
+  if (slot == APP_CODEX) return codexFrameCount();
+  return slot == APP_CURSOR ? cursorFrameCount() : 0;
+}
+
+int defaultSpriteFrameCountFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return CLAUDE_SPRITE_FRAMES;
+  if (slot == APP_CODEX) return CODEX_SPRITE_FRAMES;
+  return slot == APP_CURSOR ? CURSOR_SPRITE_FRAMES : 0;
+}
+
+const uint16_t *const *defaultSpriteFramesFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) return claude_sprite_frames;
+  if (slot == APP_CODEX) return codex_sprite_frames;
+  return slot == APP_CURSOR ? cursor_sprite_frames : nullptr;
+}
+
+void resetSpriteFrameFor(ActiveApp slot) {
+  if (slot == APP_CLAUDE) claudeFrame = 0;
+  else if (slot == APP_CODEX) codexFrame = 0;
+  else if (slot == APP_CURSOR) cursorFrame = 0;
+}
 
 // Draws one sprite frame centered on screen, one row at a time so we never
 // need a full-frame buffer: each row comes either from the custom LittleFS
@@ -408,8 +487,8 @@ void drawCodexSprite(int frameIdx) {
 }
 
 void drawCursorSprite(int frameIdx) {
-  drawSpriteFrame(false, nullptr, cursor_sprite_frames, frameIdx, CURSOR_SPRITE_W, CURSOR_SPRITE_H,
-                  CURSOR_FRAME_BYTES);
+  drawSpriteFrame(cursorCustom, CURSOR_SPRITE_FILE, cursor_sprite_frames, frameIdx, CURSOR_SPRITE_W,
+                  CURSOR_SPRITE_H, CURSOR_FRAME_BYTES);
 }
 
 String pctText(float pct) {
@@ -1012,7 +1091,8 @@ enum USBMessage : uint8_t {
 };
 enum USBResource : uint8_t {
   USB_CLAUDE_GIF = 3, USB_CODEX_GIF = 4,
-  USB_CLAUDE_SPRITE = 5, USB_CODEX_SPRITE = 6
+  USB_CLAUDE_SPRITE = 5, USB_CODEX_SPRITE = 6,
+  USB_CURSOR_GIF = 7, USB_CURSOR_SPRITE = 8
 };
 const uint8_t USB_MAGIC_0 = 0xA5, USB_MAGIC_1 = 0x5A, USB_PROTOCOL_VERSION = 1;
 const size_t USB_MAX_PAYLOAD = 1024;
@@ -1081,11 +1161,12 @@ void showMainUiIfNeeded() {
 }
 
 void resetSpriteFromUSB(ActiveApp slot) {
-  const char *path = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  const char *path = spriteFileFor(slot);
+  if (!path) return;
   LittleFS.remove(path);
   spriteRev++;
   loadCustomSpriteState();
-  if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+  resetSpriteFrameFor(slot);
   if (currentApp == slot) drawActiveApp();
 }
 
@@ -1113,6 +1194,7 @@ bool handleUSBCommand(const uint8_t *payload, size_t len) {
   if (reset) {
     if (!strcmp(reset, "claude")) resetSpriteFromUSB(APP_CLAUDE);
     else if (!strcmp(reset, "codex")) resetSpriteFromUSB(APP_CODEX);
+    else if (!strcmp(reset, "cursor")) resetSpriteFromUSB(APP_CURSOR);
     else return false;
   }
   return true;
@@ -1121,6 +1203,7 @@ bool handleUSBCommand(const uint8_t *payload, size_t len) {
 const char *usbTransferTarget(uint8_t resource) {
   if (resource == USB_CLAUDE_GIF) return CLAUDE_GIF_FILE;
   if (resource == USB_CODEX_GIF) return CODEX_GIF_FILE;
+  if (resource == USB_CURSOR_GIF) return CURSOR_GIF_FILE;
   return nullptr;
 }
 
@@ -1159,17 +1242,18 @@ bool finishUSBTransfer(uint8_t resource) {
   LittleFS.remove(target);
   if (!LittleFS.rename(USB_TRANSFER_FILE, target)) return false;
   bool ok = true;
-  if (resource == USB_CLAUDE_GIF || resource == USB_CODEX_GIF) {
-    ActiveApp slot = resource == USB_CLAUDE_GIF ? APP_CLAUDE : APP_CODEX;
-    const char *binPath = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
-    int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
-    int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  if (resource == USB_CLAUDE_GIF || resource == USB_CODEX_GIF || resource == USB_CURSOR_GIF) {
+    ActiveApp slot = resource == USB_CLAUDE_GIF ? APP_CLAUDE
+        : resource == USB_CODEX_GIF ? APP_CODEX : APP_CURSOR;
+    const char *binPath = spriteFileFor(slot);
+    int w = spriteWidthFor(slot);
+    int h = spriteHeightFor(slot);
     ok = decodeGifToBin(target, binPath, w, h);
     LittleFS.remove(target);
     if (ok) {
       spriteRev++;
       loadCustomSpriteState();
-      if (slot == APP_CLAUDE) claudeFrame = 0; else codexFrame = 0;
+      resetSpriteFrameFor(slot);
       if (currentApp == slot) drawActiveApp();
     }
   }
@@ -1180,20 +1264,24 @@ bool finishUSBTransfer(uint8_t resource) {
 }
 
 void sendSpriteResource(uint16_t seq, USBResource resource) {
-  ActiveApp slot = resource == USB_CODEX_SPRITE ? APP_CODEX : APP_CLAUDE;
-  bool custom = slot == APP_CLAUDE ? claudeCustom : codexCustom;
-  const char *path = slot == APP_CLAUDE ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
-  int frames = slot == APP_CLAUDE ? claudeFrameCount() : codexFrameCount();
-  int w = slot == APP_CLAUDE ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
-  int h = slot == APP_CLAUDE ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  ActiveApp slot = resource == USB_CLAUDE_SPRITE ? APP_CLAUDE
+      : resource == USB_CODEX_SPRITE ? APP_CODEX : APP_CURSOR;
+  bool custom = customSpriteFor(slot);
+  const char *path = spriteFileFor(slot);
+  File file;
+  if (custom) {
+    file = LittleFS.open(path, "r");
+    if (!file) custom = false;
+  }
+  int frames = custom ? spriteFrameCountFor(slot) : defaultSpriteFrameCountFor(slot);
+  int w = spriteWidthFor(slot);
+  int h = spriteHeightFor(slot);
   size_t frameBytes = (size_t)w * h * 2;
   uint32_t total = 1 + (uint32_t)frames * frameBytes;
   uint8_t begin[5] = {(uint8_t)resource, (uint8_t)total, (uint8_t)(total >> 8),
                       (uint8_t)(total >> 16), (uint8_t)(total >> 24)};
   usbSendFrame(USB_RESOURCE_BEGIN, seq, begin, sizeof(begin));
-  File file;
-  if (custom) file = LittleFS.open(path, "r");
-  const uint16_t *const *progmemFrames = slot == APP_CLAUDE ? claude_sprite_frames : codex_sprite_frames;
+  const uint16_t *const *progmemFrames = defaultSpriteFramesFor(slot);
   uint8_t chunk[USB_MAX_PAYLOAD];
   uint32_t offset = 0;
   while (offset < total) {
@@ -1252,7 +1340,9 @@ void handleUSBFrame(uint8_t type, uint16_t seq, const uint8_t *payload, size_t l
   }
   if (type == USB_GET_RESOURCE && len == 1) {
     USBResource resource = (USBResource)payload[0];
-    if (resource == USB_CLAUDE_SPRITE || resource == USB_CODEX_SPRITE) sendSpriteResource(seq, resource);
+    if (resource == USB_CLAUDE_SPRITE || resource == USB_CODEX_SPRITE || resource == USB_CURSOR_SPRITE) {
+      sendSpriteResource(seq, resource);
+    }
   }
 }
 
@@ -1344,7 +1434,8 @@ void handleRoot() {
           "立刻替换动画，无需重新编译或烧录。GIF 太大可能因内存不足解码失败，换小一点的即可。</p>";
   html += "<form id='gifForm' method='POST' enctype='multipart/form-data' onsubmit='return setGifAction()'>";
   html += "<label>角色</label>";
-  html += "<select id='gifTarget'><option value='claude'>Claude</option><option value='codex'>Codex</option></select>";
+  html += "<select id='gifTarget'><option value='claude'>Claude</option><option value='codex'>Codex</option>"
+          "<option value='cursor'>Cursor</option></select>";
   html += "<label>GIF 文件</label><input type='file' name='file' accept='.gif' required>";
   html += "<button type='submit'>上传并应用</button>";
   html += "</form>";
@@ -1424,6 +1515,9 @@ String buildDeviceInfoJson() {
   x["h"] = CODEX_SPRITE_H;
   JsonObject r = doc["cursor"].to<JsonObject>();
   r["eligible"] = cursorStatus.eligible;
+  r["custom_sprite"] = cursorCustom;
+  r["w"] = CURSOR_SPRITE_W;
+  r["h"] = CURSOR_SPRITE_H;
   String out;
   serializeJson(doc, out);
   return out;
@@ -1489,8 +1583,8 @@ void handleApiBridge() {
 // as the custom .bin: [1 byte frame count][RGB565 frames...]. Lets the Mac
 // app mirror exactly what the device is showing (custom upload or built-in).
 void handleSpriteRaw(ActiveApp slot) {
-  bool custom = (slot == APP_CLAUDE) ? claudeCustom : codexCustom;
-  const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  bool custom = customSpriteFor(slot);
+  const char *binPath = spriteFileFor(slot);
   if (custom) {
     File f = LittleFS.open(binPath, "r");
     if (f) {
@@ -1499,10 +1593,10 @@ void handleSpriteRaw(ActiveApp slot) {
       return;
     }
   }
-  int frames = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FRAMES : CODEX_SPRITE_FRAMES;
-  int w = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
-  int h = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
-  const uint16_t *const *arr = (slot == APP_CLAUDE) ? claude_sprite_frames : codex_sprite_frames;
+  int frames = defaultSpriteFrameCountFor(slot);
+  int w = spriteWidthFor(slot);
+  int h = spriteHeightFor(slot);
+  const uint16_t *const *arr = defaultSpriteFramesFor(slot);
   size_t frameBytes = (size_t)w * h * 2;
   webServer.setContentLength(1 + (size_t)frames * frameBytes);
   webServer.send(200, "application/octet-stream", "");
@@ -1516,12 +1610,11 @@ void handleSpriteRaw(ActiveApp slot) {
 
 // Removes a custom sprite so the compiled-in default animation comes back.
 void handleSpriteReset(ActiveApp slot) {
-  const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+  const char *binPath = spriteFileFor(slot);
   LittleFS.remove(binPath);
   spriteRev++;
   loadCustomSpriteState();
-  if (slot == APP_CLAUDE) claudeFrame = 0;
-  else codexFrame = 0;
+  resetSpriteFrameFor(slot);
   if (currentApp == slot) drawActiveApp();
   webServer.send(200, "text/plain", "ok");
 }
@@ -1737,18 +1830,17 @@ void handleSpriteUploadChunk(const char *gifPath) {
 }
 
 void handleSpriteUploadDone(ActiveApp slot) {
-  const char *gifPath = (slot == APP_CLAUDE) ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
-  const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
-  int tw = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
-  int th = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
+  const char *gifPath = gifFileFor(slot);
+  const char *binPath = spriteFileFor(slot);
+  int tw = spriteWidthFor(slot);
+  int th = spriteHeightFor(slot);
 
   bool ok = decodeGifToBin(gifPath, binPath, tw, th);
   LittleFS.remove(gifPath); // temp raw gif no longer needed once decoded
 
   spriteRev++;
   loadCustomSpriteState();
-  if (slot == APP_CLAUDE) claudeFrame = 0;
-  else codexFrame = 0;
+  resetSpriteFrameFor(slot);
   if (currentApp == slot) drawActiveApp();
 
   if (ok) {
@@ -1771,14 +1863,19 @@ void setupWebServer() {
     webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
     webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
     webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
+    webServer.on("/sprite/cursor/reset", HTTP_POST, []() { handleSpriteReset(APP_CURSOR); });
     webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
     webServer.on("/sprite/codex/raw", HTTP_GET, []() { handleSpriteRaw(APP_CODEX); });
+    webServer.on("/sprite/cursor/raw", HTTP_GET, []() { handleSpriteRaw(APP_CURSOR); });
     webServer.on(
         "/sprite/claude", HTTP_POST, []() { handleSpriteUploadDone(APP_CLAUDE); },
         []() { handleSpriteUploadChunk(CLAUDE_GIF_FILE); });
     webServer.on(
         "/sprite/codex", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX); },
         []() { handleSpriteUploadChunk(CODEX_GIF_FILE); });
+    webServer.on(
+        "/sprite/cursor", HTTP_POST, []() { handleSpriteUploadDone(APP_CURSOR); },
+        []() { handleSpriteUploadChunk(CURSOR_GIF_FILE); });
     webServerConfigured = true;
   }
   webServer.begin();
@@ -1856,7 +1953,7 @@ void loop() {
         codexFrame = (codexFrame + 1) % codexFrameCount();
         drawCodexSprite(codexFrame);
       } else if (currentApp == APP_CURSOR) {
-        cursorFrame = (cursorFrame + 1) % CURSOR_SPRITE_FRAMES;
+        cursorFrame = (cursorFrame + 1) % cursorFrameCount();
         drawCursorSprite(cursorFrame);
       }
     }

@@ -22,6 +22,8 @@ enum USBResource: UInt8 {
     case codexGif = 4
     case claudeSprite = 5
     case codexSprite = 6
+    case cursorGif = 7
+    case cursorSprite = 8
 }
 
 struct USBFrame {

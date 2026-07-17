@@ -39,12 +39,13 @@ if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--render-icon"
 // Entry point. Runs as an "accessory" app (menu-bar only, no Dock icon, no main
 // window) and starts the /status HTTP server that the ESP8266 clock polls.
 // Headless smoke test for the petdex -> GIF -> device pipeline (same code the
-// pet picker window uses): AIClockBridge --test-pet <slug> <claude|codex> <host>
+// pet picker window uses): AIClockBridge --test-pet <slug> <claude|codex|cursor> <host>
 if CommandLine.arguments.count >= 4, CommandLine.arguments[1] == "--test-pet" {
     let slug = CommandLine.arguments[2]
     let slot = CommandLine.arguments[3]
     if CommandLine.arguments.count >= 5 { DeviceClient.host = CommandLine.arguments[4] }
-    let size = slot == "claude" ? (w: 111, h: 120) : (w: 120, h: 120)
+    let size = slot == "claude" ? (w: 111, h: 120)
+        : slot == "codex" ? (w: 120, h: 120) : (w: 96, h: 104)
     let state = PetdexService.states.first { $0.id == "running" }!
     PetdexService.loadManifest { result in
         guard case let .success(pets) = result, let pet = pets.first(where: { $0.slug == slug }) else {

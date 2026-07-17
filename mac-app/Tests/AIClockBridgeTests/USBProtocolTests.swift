@@ -27,4 +27,9 @@ final class USBProtocolTests: XCTestCase {
         XCTAssertEqual(decoded?.type, .heartbeatAck)
         XCTAssertEqual(decoded?.sequence, 2)
     }
+
+    func testCursorResourceIDsExtendTheExistingProtocol() {
+        XCTAssertEqual(USBResource.cursorGif.rawValue, 7)
+        XCTAssertEqual(USBResource.cursorSprite.rawValue, 8)
+    }
 }

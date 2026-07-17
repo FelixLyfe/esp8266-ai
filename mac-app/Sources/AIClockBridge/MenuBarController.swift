@@ -113,7 +113,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
 
         let resetMenu = NSMenu()
-        for (title, slot) in [("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex")] {
+        for (title, slot) in [("Claude 恢复默认", "claude"), ("Codex 恢复默认", "codex"),
+                              ("Cursor 恢复默认", "cursor")] {
             let item = NSMenuItem(title: title, action: #selector(resetSprite(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = slot
@@ -221,14 +222,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             guard let self = self else { return }
             switch result {
             case let .success(info):
-                let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
-                               info.codexCustomSprite ? "X:自定义" : "X:默认"]
-                let showing = info.mode == "clock" ? "时钟"
-                    : info.showing == "claude" ? "Claude"
-                    : info.showing == "codex" ? "Codex"
-                    : info.showing == "cursor" ? "Cursor" : "无 AI 登录"
-                self.deviceInfoItem.title =
-                    "设备：\(DeviceClient.connectionDescription) · \(showing) · \(sprites.joined(separator: " "))"
+                self.deviceInfoItem.title = "设备：\(DeviceClient.connectionDescription)"
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
             case .failure:
                 self.deviceInfoItem.title = "设备：\(DeviceClient.connectionDescription)（无法读取）"

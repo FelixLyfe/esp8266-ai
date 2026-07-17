@@ -83,8 +83,8 @@ sealed class MirrorControl : Control
             return;
         }
 
-        // square quota ring: margin 4, thickness 10, clockwise from top-left
-        const float m = 4, t = 10;
+        // square quota ring: margin 1, thickness 6, clockwise from top-left
+        const float m = 1, t = 6;
         const float side = 240 - 2 * m;
         var ringColor = ShowingProvider == "cursor" && RingPct <= 0 ? Color.Red
             : DeviceOK ? Green : Color.FromArgb(90, 90, 90);
