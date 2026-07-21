@@ -27,8 +27,8 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Claude/Codex show working state; all three show quota. Cursor is quota-only: its ring is Total and the bottom row shows Auto / API remaining. Only signed-in providers with a successful quota fetch are shown. |
-| Clock | **Local clock**<br>A dedicated page shows the computer's local time, date, and weekday, synchronized to the device over USB or WiFi fallback. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Claude/Codex show working state; all three show quota. Cursor is quota-only: normally its ring is Total and the bottom row shows Auto / API; when API reaches 0% remaining, only Auto is shown and the ring switches to Auto. Only signed-in providers with a successful quota fetch are shown. |
+| Clock | **OpenAI HQ clock**<br>A dedicated page shows the time, date, and weekday in San Francisco, including daylight-saving changes, synchronized to the device over USB or WiFi fallback. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
 
 ## Getting started
@@ -67,7 +67,7 @@ Daily use is all on the tray icon: **left-click** opens a live mirror of the dev
 - **Screen border flashing red**: no bridge data is arriving — check the USB data cable, CH340 serial port, and bridge app first; in fallback mode check that both sides are on the same WiFi.
 - **A provider is missing**: it is not signed in, or this launch has not completed a successful quota fetch. Claude, Codex, and Cursor refresh independently every two minutes; data with no successful refresh for six hours leaves rotation.
 - **Retry quota now**: right-click → “手动重试额度” and retry Claude, Codex, or Cursor individually. A manual retry bypasses the current backoff delay.
-- **Cursor quota notes**: the ring is Total remaining and the bottom row is Auto / API remaining. The bridge reads Cursor's local login token and calls the internal endpoint used by the Cursor client; a future Cursor update may require a bridge update.
+- **Cursor quota notes**: normally the ring is Total remaining and the bottom row is Auto / API remaining. When API shows 0% remaining, only Auto is shown and the ring switches to Auto. The bridge reads Cursor's local login token and calls the internal endpoint used by the Cursor client; a future Cursor update may require a bridge update.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
 
 ## Development

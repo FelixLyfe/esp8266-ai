@@ -105,7 +105,7 @@ cd mac-app
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行
   macOS 可能弹一次授权框（选"始终允许"即可）；`~/.claude/.credentials.json` 存在时
   优先读文件。
-- Cursor 的 Total 是进入轮播的必需字段；Auto/API 可分别缺失，缺失的一行不画。百分比先限制到 0...100，再四舍五入为整数展示。
+- Cursor 的 Total 是进入轮播的必需字段；Auto/API 可分别缺失，缺失的一行不画。百分比先限制到 0...100，再四舍五入为整数展示。API 剩余显示为 0% 且 Auto 可用时，仅显示 Auto，外圈也改用 Auto；Auto 缺失时保留原有 Total/API 展示。
 - 若凭据缺失、401/403 或首次获取失败，该 provider 不展示；临时网络错误沿用上一次成功值，并保留精确错误和上次成功时间供菜单查看。
 
 ## 2. 烧录 ESP8266 固件
@@ -165,7 +165,7 @@ pio device monitor -b 460800
 
 - 屏幕中央：Claude/Codex 显示大幅像素动画，仅在 `working` 时播放；Cursor 显示静态专用标记。
 - 屏幕四周一圈方形进度环：环的填充长度 = 剩余额度百分比（Claude 无接口值时用
-  5 小时会话时间近似已用量再反算；Codex 按真实窗口时长区分 5h / 周额度；Cursor 外圈为 Total，底部为 Auto/API）；环的颜色/动画参考
+  5 小时会话时间近似已用量再反算；Codex 按真实窗口时长区分 5h / 周额度；Cursor 通常外圈为 Total、底部为 Auto/API，API 剩余显示为 0% 时外圈和底部都仅显示 Auto）；环的颜色/动画参考
   [vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light)
   的红绿灯设计：
   - **常亮绿** = 空闲/离线，不需要关注
@@ -217,11 +217,14 @@ pio device monitor -b 460800
 
 ## 5. 时钟页（桌面端 + 设备同步显示）
 
-显示模式切到「时钟」后，macOS / Windows 使用电脑本地时区生成 `HH:mm:ss`、
-`YYYY-MM-DD` 和英文星期缩写。USB 模式每秒推送一个独立的 `CLOCK` 帧（消息类型 `0x13`）；
+显示模式切到「时钟」后，macOS / Windows 使用 `America/Los_Angeles` 时区生成旧金山的
+`HH:mm:ss`、`YYYY-MM-DD` 和英文星期缩写，并自动处理夏令时。USB 模式每秒推送一个独立的 `CLOCK` 帧（消息类型 `0x13`）；
 WiFi 回退模式由设备每秒请求 `GET /clock`。不依赖设备 NTP，也不采集 SSID 或网卡流量。
+`CLOCK` JSON 保留旧版 `time/date/weekday` 本地时间字段供旧固件使用，并新增
+`zone=America/Los_Angeles` 与 `zone_time/zone_date/zone_weekday`。新固件只有验证到这些
+带时区字段后才显示 `OPENAI HQ`；连接旧版 App 时会安全降级为 `LOCAL TIME`，避免混装版本误标时间。
 
-设备和桌面镜像使用同一布局：顶部 `LOCAL TIME`，中间大号时间，底部依次显示日期和星期。
+设备和桌面镜像使用同一布局：顶部 `OPENAI HQ`，中间大号时间，底部依次显示日期和星期。
 固件只局部重绘发生变化的文本区域，避免每秒整屏闪烁。
 
 若自行配置 LaunchAgent，目标应指向 `dist/AIClockBridge.app/Contents/MacOS/AIClockBridge`。

@@ -53,6 +53,7 @@ final class MirrorView: NSView {
     var flashOn = false
     var line1 = "5h -"
     var line2 = "Weekly -"
+    var cursorAutoOnly = false
     var showingProvider = "claude"
     var stale = false
     var deviceOK = false
@@ -96,7 +97,8 @@ final class MirrorView: NSView {
         // square quota ring: margin 1, thickness 6, clockwise from top-left
         let m: CGFloat = 1, t: CGFloat = 6
         let side: CGFloat = 240 - 2 * m
-        let color = showingProvider == "cursor" && ringPct <= 0 ? NSColor.systemRed
+        let color = showingProvider == "cursor" && isCursorRingExhausted(remainingPct: ringPct)
+            ? NSColor.systemRed
             : deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
                              : NSColor.darkGray
         color.setFill()
@@ -145,8 +147,12 @@ final class MirrorView: NSView {
             .paragraphStyle: style,
         ]
         if showingProvider == "cursor" {
-            (line1 as NSString).draw(in: NSRect(x: 14, y: 188, width: 100, height: 36), withAttributes: attrs)
-            (line2 as NSString).draw(in: NSRect(x: 126, y: 188, width: 100, height: 36), withAttributes: attrs)
+            if cursorAutoOnly {
+                (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 36), withAttributes: attrs)
+            } else {
+                (line1 as NSString).draw(in: NSRect(x: 14, y: 188, width: 100, height: 36), withAttributes: attrs)
+                (line2 as NSString).draw(in: NSRect(x: 126, y: 188, width: 100, height: 36), withAttributes: attrs)
+            }
         } else {
             (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
             (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
@@ -248,7 +254,7 @@ final class MirrorView: NSView {
         let snapshot = ClockSnapshot.current()
         let center = NSMutableParagraphStyle()
         center.alignment = .center
-        ("LOCAL TIME" as NSString).draw(in: NSRect(x: 0, y: 30, width: 240, height: 20), withAttributes: [
+        ("OPENAI HQ" as NSString).draw(in: NSRect(x: 0, y: 30, width: 240, height: 20), withAttributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
             .foregroundColor: NSColor.lightGray,
             .paragraphStyle: center,
@@ -450,6 +456,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         modeControl.setEnabled(snap.codex.eligible, forSegment: 2)
         modeControl.setEnabled(snap.cursor.eligible, forSegment: 3)
         mirror.showingProvider = info.showing
+        mirror.cursorAutoOnly = false
         if info.showing == "checking" || info.showing == "none" {
             mirror.frames = []
             mirror.needsInput = false
@@ -478,11 +485,16 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.needsInput = snap.codex.needsInput
             mirror.stale = snap.codex.stale
         } else {
-            mirror.ringPct = remainingPercent(fromUsed: snap.cursor.totalPct) ?? 0
+            let autoOnly = shouldShowOnlyCursorAuto(apiUsedPct: snap.cursor.apiPct,
+                                                    autoUsedPct: snap.cursor.autoPct)
+            mirror.cursorAutoOnly = autoOnly
+            mirror.ringPct = cursorRingRemainingPercent(totalUsedPct: snap.cursor.totalPct,
+                                                        autoUsedPct: snap.cursor.autoPct,
+                                                        apiUsedPct: snap.cursor.apiPct) ?? 0
             let auto = remainingPercent(fromUsed: snap.cursor.autoPct)
             let api = remainingPercent(fromUsed: snap.cursor.apiPct)
             mirror.line1 = auto == nil ? "" : "AUTO LEFT\n" + Self.pctText(auto)
-            mirror.line2 = api == nil ? "" : "API LEFT\n" + Self.pctText(api)
+            mirror.line2 = autoOnly || api == nil ? "" : "API LEFT\n" + Self.pctText(api)
             mirror.needsInput = false
             mirror.stale = snap.cursor.stale
         }

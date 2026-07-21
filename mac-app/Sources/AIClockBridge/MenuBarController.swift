@@ -189,8 +189,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             return "Cursor：\(u.error ?? "额度未知")"
         }
         var parts: [String] = []
+        let autoOnly = shouldShowOnlyCursorAuto(apiUsedPct: u.apiPct, autoUsedPct: u.autoPct)
         if let auto = remainingPercent(fromUsed: u.autoPct) { parts.append("Auto剩余\(Int(auto.rounded()))%") }
-        if let api = remainingPercent(fromUsed: u.apiPct) { parts.append("API剩余\(Int(api.rounded()))%") }
+        if !autoOnly, let api = remainingPercent(fromUsed: u.apiPct) {
+            parts.append("API剩余\(Int(api.rounded()))%")
+        }
         if let reset = u.billingResetMin { parts.append("（\(fmtMin(reset))）") }
         return appendFreshness("Cursor　" + parts.joined(separator: "　"), usage: u)
     }

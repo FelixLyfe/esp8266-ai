@@ -185,10 +185,11 @@ sealed class TrayAppContext : ApplicationContext
         if (usage.IsLoggedOut) return "Cursor：未登录";
         if (!usage.TotalPct.HasValue) return $"Cursor：{usage.Error ?? "额度未知"}";
         var parts = new List<string>();
+        var autoOnly = CursorQuotaPolicy.ShouldShowAutoOnly(usage.ApiPct, usage.AutoPct);
         if (UsageFetcher.RemainingPercent(usage.AutoPct) is double auto)
-            parts.Add($"Auto剩余{(int)Math.Round(auto)}%");
-        if (UsageFetcher.RemainingPercent(usage.ApiPct) is double api)
-            parts.Add($"API剩余{(int)Math.Round(api)}%");
+            parts.Add($"Auto剩余{CursorQuotaPolicy.DisplayPercent(auto)}%");
+        if (!autoOnly && UsageFetcher.RemainingPercent(usage.ApiPct) is double api)
+            parts.Add($"API剩余{CursorQuotaPolicy.DisplayPercent(api)}%");
         if (usage.BillingResetMin.HasValue) parts.Add($"（{FmtMin(usage.BillingResetMin.Value)}）");
         return AppendFreshness("Cursor　" + string.Join("　", parts), usage);
     }

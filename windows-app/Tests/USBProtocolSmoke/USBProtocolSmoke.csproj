@@ -6,6 +6,8 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../AIClockBridge/ClockSnapshot.cs" Link="ClockSnapshot.cs" />
+    <Compile Include="../../AIClockBridge/CursorQuotaPolicy.cs" Link="CursorQuotaPolicy.cs" />
     <Compile Include="../../AIClockBridge/USBProtocol.cs" Link="USBProtocol.cs" />
   </ItemGroup>
 </Project>

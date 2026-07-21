@@ -17,6 +17,7 @@
 #include <AnimatedGIF.h>
 
 #include "config.h"
+#include "cursor_quota_policy.h"
 #include "rotation_policy.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
@@ -80,7 +81,7 @@ unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
 // auto = follow working status, claude/codex = pin that app on screen,
-// clock = show the host computer's local time instead of the pet.
+// clock = show OpenAI HQ's San Francisco time instead of the pet.
 enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_CURSOR, MODE_CLOCK };
 DisplayMode displayMode = MODE_AUTO;
 DisplayMode lastEffectiveMode = MODE_AUTO;
@@ -91,6 +92,7 @@ String clockTime = "--:--:--";
 String clockDate = "---- -- --";
 String clockWeekday = "---";
 String clockLastTime, clockLastDate, clockLastWeekday;
+bool clockShowsOpenAIHQ = false;
 unsigned long lastClockPollMs = 0;
 bool clockChromeDrawn = false;
 
@@ -407,7 +409,9 @@ bool appStale(ActiveApp app) {
 // green, except bridge-stale which flashes red and overrides everything.
 uint16_t currentStatusColor() {
   if (bridgeStale()) return flashOn ? TFT_RED : TFT_BLACK;
-  if (currentApp == APP_CURSOR && cursorStatus.totalPct >= 99.9f) return TFT_RED;
+  if (currentApp == APP_CURSOR
+      && CursorQuotaPolicy::ringIsExhausted(CursorQuotaPolicy::ringUsedPercent(
+          cursorStatus.totalPct, cursorStatus.autoPct, cursorStatus.apiPct))) return TFT_RED;
   return TFT_GREEN;
 }
 
@@ -756,10 +760,13 @@ void drawActiveApp() {
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
     drawQuotaText(remainingPct(codexStatus.primaryPct), remainingPct(codexStatus.weeklyPct), true);
   } else {
-    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
+    bool autoOnly = CursorQuotaPolicy::shouldShowAutoOnly(cursorStatus.apiPct, cursorStatus.autoPct);
+    drawSquareRing(remainingPct(CursorQuotaPolicy::ringUsedPercent(
+                       cursorStatus.totalPct, cursorStatus.autoPct, cursorStatus.apiPct)),
+                   currentStatusColor());
     drawCursorSprite(cursorFrame);
     drawQuotaTextWithLabels("AUTO LEFT", remainingPct(cursorStatus.autoPct),
-                            "API LEFT", remainingPct(cursorStatus.apiPct), true);
+                            "API LEFT", autoOnly ? -1.0f : remainingPct(cursorStatus.apiPct), true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -782,9 +789,12 @@ void refreshActiveApp() {
     drawSquareRing(max(remainingPct(ringUsedPct), 0.0f), currentStatusColor());
     drawQuotaText(remainingPct(codexStatus.primaryPct), remainingPct(codexStatus.weeklyPct), false);
   } else {
-    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
+    bool autoOnly = CursorQuotaPolicy::shouldShowAutoOnly(cursorStatus.apiPct, cursorStatus.autoPct);
+    drawSquareRing(remainingPct(CursorQuotaPolicy::ringUsedPercent(
+                       cursorStatus.totalPct, cursorStatus.autoPct, cursorStatus.apiPct)),
+                   currentStatusColor());
     drawQuotaTextWithLabels("AUTO LEFT", remainingPct(cursorStatus.autoPct),
-                            "API LEFT", remainingPct(cursorStatus.apiPct), false);
+                            "API LEFT", autoOnly ? -1.0f : remainingPct(cursorStatus.apiPct), false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
@@ -803,7 +813,9 @@ void redrawRingOnly() {
     float ringUsedPct = codexStatus.primaryPct >= 0 ? codexStatus.primaryPct : codexStatus.weeklyPct;
     drawSquareRing(max(remainingPct(ringUsedPct), 0.0f), currentStatusColor());
   } else {
-    drawSquareRing(remainingPct(cursorStatus.totalPct), currentStatusColor());
+    drawSquareRing(remainingPct(CursorQuotaPolicy::ringUsedPercent(
+                       cursorStatus.totalPct, cursorStatus.autoPct, cursorStatus.apiPct)),
+                   currentStatusColor());
   }
 }
 
@@ -848,7 +860,7 @@ void drawClockScreen() {
     tft.setTextDatum(TC_DATUM);
     tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     tft.setTextSize(1);
-    tft.drawString("LOCAL TIME", SCREEN_CX, 28, 2);
+    tft.drawString(clockShowsOpenAIHQ ? "OPENAI HQ" : "LOCAL TIME", SCREEN_CX, 28, 2);
     clockChromeDrawn = true;
     clockLastTime = "";
     clockLastDate = "";
@@ -885,6 +897,20 @@ bool handleClockPayload(const String &payload) {
   const char *weekdayValue = doc["weekday"] | (const char *)nullptr;
   if (!timeValue || !dateValue || !weekdayValue
       || strlen(timeValue) != 8 || strlen(dateValue) != 10 || strlen(weekdayValue) != 3) return false;
+  const char *zoneValue = doc["zone"] | "";
+  const char *zoneTimeValue = doc["zone_time"] | "";
+  const char *zoneDateValue = doc["zone_date"] | "";
+  const char *zoneWeekdayValue = doc["zone_weekday"] | "";
+  bool hasSanFranciscoTime = strcmp(zoneValue, "America/Los_Angeles") == 0
+      && strlen(zoneTimeValue) == 8 && strlen(zoneDateValue) == 10
+      && strlen(zoneWeekdayValue) == 3;
+  if (clockShowsOpenAIHQ != hasSanFranciscoTime) clockChromeDrawn = false;
+  clockShowsOpenAIHQ = hasSanFranciscoTime;
+  if (hasSanFranciscoTime) {
+    timeValue = zoneTimeValue;
+    dateValue = zoneDateValue;
+    weekdayValue = zoneWeekdayValue;
+  }
   clockTime = timeValue;
   clockDate = dateValue;
   clockWeekday = weekdayValue;
@@ -1452,10 +1478,15 @@ void handleRoot() {
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
           formatTokens(codexStatus.tokensToday) + " tok, 5h left " + pctText(remainingPct(codexStatus.primaryPct)) +
           ", Wk left " + pctText(remainingPct(codexStatus.weeklyPct)) + "</td></tr>";
-  html += "<tr><td>Cursor</td><td>Total left " +
-          pctText(remainingPct(cursorStatus.totalPct)) + ", Auto left " +
-          pctText(remainingPct(cursorStatus.autoPct)) + ", API left " +
-          pctText(remainingPct(cursorStatus.apiPct)) + "</td></tr>";
+  html += "<tr><td>Cursor</td><td>";
+  if (CursorQuotaPolicy::shouldShowAutoOnly(cursorStatus.apiPct, cursorStatus.autoPct)) {
+    html += "Auto left " + pctText(remainingPct(cursorStatus.autoPct));
+  } else {
+    html += "Total left " + pctText(remainingPct(cursorStatus.totalPct)) + ", Auto left " +
+            pctText(remainingPct(cursorStatus.autoPct)) + ", API left " +
+            pctText(remainingPct(cursorStatus.apiPct));
+  }
+  html += "</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "

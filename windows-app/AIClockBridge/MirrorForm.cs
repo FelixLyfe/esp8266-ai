@@ -25,6 +25,7 @@ sealed class MirrorControl : Control
     public bool FlashOn;
     public string Line1 = "5h -";
     public string Line2 = "Weekly -";
+    public bool CursorAutoOnly;
     public string ShowingProvider = "claude";
     public bool Stale;
     public bool DeviceOK;
@@ -86,7 +87,8 @@ sealed class MirrorControl : Control
         // square quota ring: margin 1, thickness 6, clockwise from top-left
         const float m = 1, t = 6;
         const float side = 240 - 2 * m;
-        var ringColor = ShowingProvider == "cursor" && RingPct <= 0 ? Color.Red
+        var ringColor = ShowingProvider == "cursor" && CursorQuotaPolicy.IsRingExhausted(RingPct)
+            ? Color.Red
             : DeviceOK ? Green : Color.FromArgb(90, 90, 90);
         using (var ring = new SolidBrush(ringColor))
         {
@@ -129,8 +131,13 @@ sealed class MirrorControl : Control
         {
             if (ShowingProvider == "cursor")
             {
-                g.DrawString(Line1, font, Brushes.White, new RectangleF(14, 188, 100, 36), fmt);
-                g.DrawString(Line2, font, Brushes.White, new RectangleF(126, 188, 100, 36), fmt);
+                if (CursorAutoOnly)
+                    g.DrawString(Line1, font, Brushes.White, new RectangleF(0, 188, 240, 36), fmt);
+                else
+                {
+                    g.DrawString(Line1, font, Brushes.White, new RectangleF(14, 188, 100, 36), fmt);
+                    g.DrawString(Line2, font, Brushes.White, new RectangleF(126, 188, 100, 36), fmt);
+                }
             }
             else
             {
@@ -210,7 +217,7 @@ sealed class MirrorControl : Control
         using var weekday = new Font("Consolas", 15, FontStyle.Bold, GraphicsUnit.Pixel);
         using var cyan = new SolidBrush(Color.Cyan);
         using var yellow = new SolidBrush(Yellow);
-        g.DrawString("LOCAL TIME", title, Brushes.LightGray, new RectangleF(0, 30, 240, 20), center);
+        g.DrawString("OPENAI HQ", title, Brushes.LightGray, new RectangleF(0, 30, 240, 20), center);
         g.DrawString(snapshot.Time, time, cyan, new RectangleF(0, 70, 240, 58), center);
         g.DrawString(snapshot.Date, date, Brushes.White, new RectangleF(0, 148, 240, 26), center);
         g.DrawString(snapshot.Weekday, weekday, yellow, new RectangleF(0, 188, 240, 22), center);
@@ -456,6 +463,7 @@ sealed class MirrorForm : Form
         _modeButtons[2].Enabled = snap.Codex.Eligible;
         _modeButtons[3].Enabled = snap.Cursor.Eligible;
         _mirror.ShowingProvider = info.Showing;
+        _mirror.CursorAutoOnly = false;
         if (info.Showing is "checking" or "none")
         {
             _mirror.Frames = new();
@@ -489,11 +497,14 @@ sealed class MirrorForm : Form
         }
         else
         {
-            _mirror.RingPct = UsageFetcher.RemainingPercent(snap.Cursor.TotalPct) ?? 0;
+            var autoOnly = CursorQuotaPolicy.ShouldShowAutoOnly(snap.Cursor.ApiPct, snap.Cursor.AutoPct);
+            _mirror.CursorAutoOnly = autoOnly;
+            _mirror.RingPct = CursorQuotaPolicy.RingRemainingPercent(
+                snap.Cursor.TotalPct, snap.Cursor.AutoPct, snap.Cursor.ApiPct) ?? 0;
             var auto = UsageFetcher.RemainingPercent(snap.Cursor.AutoPct);
             var api = UsageFetcher.RemainingPercent(snap.Cursor.ApiPct);
-            _mirror.Line1 = auto.HasValue ? "AUTO LEFT\n" + PctText(auto) : "";
-            _mirror.Line2 = api.HasValue ? "API LEFT\n" + PctText(api) : "";
+            _mirror.Line1 = auto.HasValue ? "AUTO LEFT\n" + CursorPctText(auto) : "";
+            _mirror.Line2 = !autoOnly && api.HasValue ? "API LEFT\n" + CursorPctText(api) : "";
             _mirror.NeedsInput = false;
             _mirror.Stale = snap.Cursor.Stale;
         }
@@ -502,6 +513,9 @@ sealed class MirrorForm : Form
 
     static string PctText(double? pct) =>
         pct.HasValue && pct.Value >= 0 ? $"{(int)Math.Round(pct.Value)}%" : "-";
+
+    static string CursorPctText(double? pct) =>
+        CursorQuotaPolicy.DisplayPercent(pct) is int value ? $"{value}%" : "-";
 
     void EnsureSprite(DeviceInfo info)
     {

@@ -63,6 +63,23 @@ func remainingPercent(fromUsed used: Double?) -> Double? {
     return min(100, max(0, 100 - used))
 }
 
+func shouldShowOnlyCursorAuto(apiUsedPct: Double?, autoUsedPct: Double?) -> Bool {
+    guard remainingPercent(fromUsed: autoUsedPct) != nil,
+          let apiRemaining = remainingPercent(fromUsed: apiUsedPct) else { return false }
+    return Int(apiRemaining.rounded()) == 0
+}
+
+func cursorRingRemainingPercent(totalUsedPct: Double?, autoUsedPct: Double?,
+                                apiUsedPct: Double?) -> Double? {
+    let usedPct = shouldShowOnlyCursorAuto(apiUsedPct: apiUsedPct, autoUsedPct: autoUsedPct)
+        ? autoUsedPct : totalUsedPct
+    return remainingPercent(fromUsed: usedPct)
+}
+
+func isCursorRingExhausted(remainingPct: Double) -> Bool {
+    remainingPct <= 0.1
+}
+
 struct CodexQuotaWindow {
     let usedPct: Double?
     let windowMin: Int?

@@ -11,6 +11,29 @@ final class UsageFetcherTests: XCTestCase {
         XCTAssertNil(remainingPercent(fromUsed: -1))
     }
 
+    func testCursorAutoOnlyUsesDisplayedAPIRemainingAndRequiresAuto() {
+        XCTAssertTrue(shouldShowOnlyCursorAuto(apiUsedPct: 100, autoUsedPct: 40))
+        XCTAssertTrue(shouldShowOnlyCursorAuto(apiUsedPct: 99.51, autoUsedPct: 40))
+        XCTAssertFalse(shouldShowOnlyCursorAuto(apiUsedPct: 99.5, autoUsedPct: 40))
+        XCTAssertFalse(shouldShowOnlyCursorAuto(apiUsedPct: 99, autoUsedPct: 40))
+        XCTAssertFalse(shouldShowOnlyCursorAuto(apiUsedPct: 100, autoUsedPct: nil))
+        XCTAssertFalse(shouldShowOnlyCursorAuto(apiUsedPct: nil, autoUsedPct: 40))
+    }
+
+    func testCursorRingFollowsAutoOnlyWhenAPIIsDisplayedAsZero() {
+        XCTAssertEqual(cursorRingRemainingPercent(totalUsedPct: 100, autoUsedPct: 40,
+                                                  apiUsedPct: 100), 60)
+        XCTAssertEqual(cursorRingRemainingPercent(totalUsedPct: 75, autoUsedPct: 40,
+                                                  apiUsedPct: 99), 25)
+        XCTAssertEqual(cursorRingRemainingPercent(totalUsedPct: 100, autoUsedPct: nil,
+                                                  apiUsedPct: 100), 0)
+    }
+
+    func testCursorRingExhaustionMatchesFirmwareThreshold() {
+        XCTAssertTrue(isCursorRingExhausted(remainingPct: 0.1))
+        XCTAssertFalse(isCursorRingExhausted(remainingPct: 0.1001))
+    }
+
     func testProLitePrimaryWindowIsClassifiedAsWeeklyByDuration() {
         let rateLimit: [String: Any] = [
             "primary_window": [

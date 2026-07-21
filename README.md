@@ -27,8 +27,8 @@
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>Claude/Codex 显示工作状态，三家都显示额度。Cursor 只监测额度：外圈显示 Total，底部同时显示 Auto / API 剩余百分比。仅展示已登录且成功取得额度的账号。 |
-| 时钟 | **本地时钟**<br>独立页面显示电脑当前的本地时间、日期和星期，通过 USB 或 WiFi 回退同步到设备。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>Claude/Codex 显示工作状态，三家都显示额度。Cursor 只监测额度：通常外圈显示 Total、底部显示 Auto / API；API 剩余为 0% 时仅显示 Auto，外圈也切换为 Auto。仅展示已登录且成功取得额度的账号。 |
+| 时钟 | **OpenAI 总部时钟**<br>独立页面显示旧金山的时间、日期和星期，并自动处理夏令时，通过 USB 或 WiFi 回退同步到设备。 |
 | <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |
 
 ## 快速上手
@@ -67,7 +67,7 @@ macOS 与 Windows 日常使用都可跳过此步。拔掉 USB 或关闭桥接程
 - **屏幕边框红色闪烁**：设备收不到桥接数据——先确认 USB 数据线、CH340 串口和桥接程序；WiFi 回退模式再检查两端是否在同一网络。
 - **看不到某个 AI 项**：该应用没有登录，或本次启动后尚未成功取得额度。Claude、Codex、Cursor 会独立每 2 分钟刷新；连续 6 小时没有成功数据会从轮播中移除。
 - **想立即重新获取额度**：右键菜单 →「手动重试额度」，可分别重试 Claude、Codex、Cursor；手动重试会跳过当前退避等待。
-- **Cursor 额度说明**：外圈是 Total 剩余量，底部是 Auto / API 剩余量。读取本机 Cursor 登录 token 并调用 Cursor 客户端当前使用的内部接口；Cursor 升级后接口可能变化，届时需要更新桥接程序。
+- **Cursor 额度说明**：通常外圈是 Total 剩余量，底部是 Auto / API 剩余量；API 剩余显示为 0% 时仅显示 Auto，外圈也改为 Auto。读取本机 Cursor 登录 token 并调用 Cursor 客户端当前使用的内部接口；Cursor 升级后接口可能变化，届时需要更新桥接程序。
 - **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
 
 ## 开发
